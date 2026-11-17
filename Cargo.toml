@@ -1,0 +1,51 @@
+[package]
+name = "iztop"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal ZFS pool I/O monitor: per-vdev operations, bandwidth, latency and disk busy"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+repository = "https://github.com/GladTechInfo/iztop"
+keywords = ["zfs", "zpool", "iostat", "monitor", "tui"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = "=0.29.0"
+crossterm = "=0.28.1"
+# System calls made directly in Rust (no C library bindings in iztop itself).
+rustix = { version = "0.38.44", features = ["process"] }
+
+# Debian, Ubuntu and Proxmox package (`cargo deb`).
+[package.metadata.deb]
+maintainer = "GladTechInfo <205174930+GladTechInfo@users.noreply.github.com>"
+copyright = "GladTechInfo"
+section = "utils"
+priority = "optional"
+recommends = "zfsutils-linux"
+extended-description = """\
+Terminal ZFS pool I/O monitor, in the manner of zpool iostat -v: one box per \
+pool and one row per vdev and disk, with operations, bandwidth and latency, \
+how busy each disk is, health and error counters, capacity, fragmentation and \
+scrub or resilver progress. Static binary; no library dependencies. Needs the \
+zpool command."""
+assets = [
+    ["target/release/iztop", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/iztop/README.md", "644"],
+]
+
+# Fedora, RHEL and openSUSE package (`cargo generate-rpm`).
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/iztop", dest = "/usr/bin/iztop", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/iztop/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/iztop/LICENSE", mode = "644", doc = true },
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Nothing here unwinds deliberately, and ratatui's panic hook still restores
+# the terminal, since the hook runs before the abort.
+panic = "abort"
