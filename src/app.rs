@@ -18,6 +18,16 @@ pub fn window_label(seconds: usize) -> String {
     format!("{}m", seconds / 60)
 }
 
+/// A window as written on the command line or in the config file.
+pub fn parse_window(s: &str) -> Option<usize> {
+    match s {
+        "1m" | "60s" => Some(60),
+        "10m" => Some(600),
+        "60m" | "1h" => Some(3600),
+        _ => None,
+    }
+}
+
 /// How often health, errors and scrub progress are re-read.
 const STATUS_EVERY: Duration = Duration::from_secs(5);
 /// How long to wait before restarting a `zpool iostat` that ended.

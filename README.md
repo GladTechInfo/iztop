@@ -330,8 +330,7 @@ static binary that runs on other machines, see [Static builds](#static-builds).
 | `makepkg` (Arch, CachyOS) | `sudo pacman -R iztop` |
 | Static binary or source build | `sudo rm /usr/local/bin/iztop`, and delete the cloned directory if you have one. |
 
-The only file iztop ever writes is its pools-menu configuration, and only when you press `W` in
-that menu. To remove it too: `rm -r ~/.config/iztop` (as the user who saved it — `/root/.config` if
+The only file iztop ever writes is its configuration, and only when you press `W`. To remove it too: `rm -r ~/.config/iztop` (as the user who saved it — `/root/.config` if
 you ran iztop with `sudo`).
 
 ---
@@ -432,6 +431,7 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 | `n`, `b` | Next or previous pool | Graphs the next or previous pool in display order; turns the graph on if it was off. |
 | `a` | Busiest pool | Returns the graph to following the busiest pool. |
 | `w` | History window | Cycles the span of every graph: the last *1 minute* (default) → *10 minutes* → *60 minutes*. |
+| `W` | Save | Saves the history window, with the pools menu's order and hidden pools, to the [configuration file](#configuration-file), so iztop starts with them next time. |
 
 ![The bandwidth graph after n](docs/images/iztop-graph-next-pool.png)
 
@@ -458,7 +458,7 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 | `Space`, `Enter` | Show or hide the selected pool (`[x]` shown, `[ ]` hidden). |
 | `Shift+↑` `Shift+↓`, `+` `-`, `K` `J` | Move the selected pool up or down. |
 | `r` | Default order (alphabetical), every pool shown. |
-| `W` | Save the order and hidden pools to the configuration file. |
+| `W` | Save the order and hidden pools, and the history window, to the configuration file. |
 | `Esc`, `d`, `q` | Close the menu. |
 
 ---
@@ -583,7 +583,7 @@ the **latency** columns are dropped first, then the **operations** columns.
 | `-i`, `--interval <MS>` | Refresh interval in milliseconds, 250–10000. | 1000 |
 | `-l`, `--vdevs-only` | Hide the disks inside mirrors and raidz vdevs. | disks shown |
 | `-g`, `--graph <MODE>` | Bandwidth graph: `auto` (when there is room), `on`, `off`. | `auto` |
-| `-w`, `--window <SPAN>` | History the graphs span: `1m`, `10m` or `60m`. | `1m` |
+| `-w`, `--window <SPAN>` | History the graphs span: `1m`, `10m` or `60m`. | `1m`, or `window` in the configuration file |
 | `--full-names` | Full device names, not shortened ones. | short |
 | `--once` | Print one interval as plain text and exit. | |
 | `--no-icons` | ASCII markers instead of Nerd Font glyphs. | icons |
@@ -594,14 +594,15 @@ the **latency** columns are dropped first, then the **operations** columns.
 
 ### Configuration file
 
-iztop's configuration file holds only what the pools menu sets, and is written only when you press
-`W` in that menu. It lives at `$XDG_CONFIG_HOME/iztop/iztop.conf`, normally
+iztop's configuration file holds only what the pools menu and `w` set, and is written only when you
+press `W`, in the main view or the pools menu. It lives at `$XDG_CONFIG_HOME/iztop/iztop.conf`, normally
 `~/.config/iztop/iztop.conf` — for `sudo iztop`, root's home directory.
 
 | Key | Meaning |
 |---|---|
 | `pool_order` | Pool names, comma-separated, shown first and in this order. Pools not listed follow alphabetically, so a newly imported pool still appears. |
 | `pool_hidden` | Pool names, comma-separated, never shown unless named on the command line. |
+| `window` | History the graphs span at start: `1m`, `10m` or `60m`. Empty for the default (`1m`). `-w` on the command line overrides it. |
 
 Example:
 
@@ -609,6 +610,7 @@ Example:
 # ~/.config/iztop/iztop.conf
 pool_order = tank, fast
 pool_hidden = backup
+window = 10m
 ```
 
 If a line is invalid, iztop reports it with its line number and applies the rest.

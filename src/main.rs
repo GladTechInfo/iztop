@@ -33,7 +33,8 @@ OPTIONS:
     -i, --interval <MS>   refresh interval in milliseconds (250-10000, default 1000)
     -l, --vdevs-only      hide the disks inside mirrors and raidz vdevs
     -g, --graph <MODE>    bandwidth graph: auto (when there is room), on, off
-    -w, --window <SPAN>   history the graphs span: 1m, 10m or 60m (default 1m)
+    -w, --window <SPAN>   history the graphs span: 1m, 10m or 60m (default 1m,
+                          or as saved in the config file)
         --full-names      full device names, not shortened ones
         --once            print a single plain-text sample and exit
         --no-icons        plain ASCII markers instead of Nerd Font glyphs
@@ -43,9 +44,9 @@ OPTIONS:
     -h, --help            this text
 
 With no POOL, every imported pool is shown, except those hidden in the
-config file. Press d in iztop to order, show or hide pools, and W there to
-save the choice to the config file. Pools named on the command line are
-shown whether hidden or not, in the configured order.
+config file. Press d in iztop to order, show or hide pools, and W to save
+the pools and the history window to the config file. Pools named on the
+command line are shown whether hidden or not, in the configured order.
 
 FIGURES:
     Operations, bandwidth and latency are zpool iostat's own, read from a
@@ -74,8 +75,8 @@ struct Args {
     once: bool,
     icons: bool,
     clock: bool,
-    /// Seconds of history the graphs span.
-    window: usize,
+    /// Seconds of history the graphs span, if given.
+    window: Option<usize>,
     config: Option<PathBuf>,
 }
 
@@ -89,7 +90,7 @@ fn parse_args() -> Result<Args, String> {
         once: false,
         icons: true,
         clock: true,
-        window: app::WINDOWS[0],
+        window: None,
         config: None,
     };
     let mut it = std::env::args().skip(1);
@@ -117,12 +118,9 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "-w" | "--window" => {
-                a.window = match it.next().as_deref() {
-                    Some("1m" | "60s") => 60,
-                    Some("10m") => 600,
-                    Some("60m" | "1h") => 3600,
-                    _ => return Err("--window takes 1m, 10m or 60m".into()),
-                }
+                a.window = Some(
+                    it.next().as_deref().and_then(app::parse_window).ok_or("--window takes 1m, 10m or 60m")?,
+                )
             }
             "--full-names" => a.full_names = true,
             "--once" => a.once = true,
@@ -292,7 +290,7 @@ fn run_tui(
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let mut ui = Ui {
-        window: args.window,
+        window: args.window.or(cfg.window).unwrap_or(app::WINDOWS[0]),
         icons: args.icons,
         leaves: args.leaves,
         full_names: args.full_names,
@@ -475,6 +473,7 @@ fn handle_key(k: KeyEvent, ui: &mut Ui, app: &mut app::App, paused: &mut bool, h
             ui.window = app::WINDOWS[i];
             ui.say(format!("history: last {}", app::window_label(ui.window)), false);
         }
+        KeyCode::Char('W') => save(ui),
         KeyCode::Char('i') => ui.icons = !ui.icons,
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('-') => {
             let cur = INTERVAL_STEPS.iter().position(|s| *s >= app.interval_ms).unwrap_or(2);
@@ -545,13 +544,14 @@ fn move_pool(ui: &mut Ui, c: usize, by: isize) {
     ui.menu = Some(to as usize);
 }
 
-/// `W`: the pool order and hidden pools, written to the config file on
-/// request only.
+/// `W`: the pool order, hidden pools and history window, written to the
+/// config file on request only.
 fn save(ui: &mut Ui) {
     let Some(path) = ui.path.clone() else {
         ui.say("no config path: HOME is not set", true);
         return;
     };
+    ui.cfg.window = Some(ui.window);
     match ui.cfg.save(&path) {
         Ok(()) => ui.say(format!("saved {}", path.display()), false),
         Err(e) => ui.say(format!("save failed: {}", e), true),

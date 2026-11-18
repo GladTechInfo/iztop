@@ -769,7 +769,7 @@ fn draw_graph(f: &mut Frame, area: Rect, v: &View) {
 
 // ─────────────────────────── help ───────────────────────────
 
-pub const HELP: [(&str, &str); 14] = [
+pub const HELP: [(&str, &str); 15] = [
     ("q  Esc", "quit (Esc first closes this)"),
     ("↑ ↓  PgUp PgDn", "scroll through the pools"),
     ("Home End", "first or last pool"),
@@ -781,6 +781,7 @@ pub const HELP: [(&str, &str); 14] = [
     ("p", "full device names or short ones"),
     ("+  -", "slower or faster refresh"),
     ("w", "history: last 1, 10 or 60 minutes"),
+    ("W", "save pools and history window"),
     ("Space", "pause"),
     ("i", "icons or ASCII"),
     ("?", "this help"),

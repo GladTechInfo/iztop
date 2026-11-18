@@ -1,7 +1,8 @@
 //! Settings file: `~/.config/iztop/iztop.conf`, `key = value`, as istop's.
 //!
-//! Only what is chosen interactively lives here — the pools' order and which
-//! are hidden — and it is written only when `W` is pressed.
+//! Only what is chosen interactively lives here — the pools' order, which
+//! are hidden and the history window — and it is written only when `W` is
+//! pressed.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,8 @@ pub struct Config {
     /// imported pool still appears.
     pub pool_order: Vec<String>,
     pub pool_hidden: Vec<String>,
+    /// Seconds of history the graphs span; None: the default.
+    pub window: Option<usize>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -44,6 +47,11 @@ impl Config {
             match k.trim() {
                 "pool_order" => c.pool_order = parse_list(v),
                 "pool_hidden" => c.pool_hidden = parse_list(v),
+                "window" if v.is_empty() => c.window = None,
+                "window" => match crate::app::parse_window(v) {
+                    Some(w) => c.window = Some(w),
+                    None => errors.push(format!("line {}: window takes 1m, 10m or 60m", n + 1)),
+                },
                 other => errors.push(format!("line {}: unknown key \"{}\"", n + 1, other)),
             }
         }
@@ -62,16 +70,20 @@ impl Config {
         format!(
             "\
 # iztop configuration. `key = value`; `#` starts a comment.
-# Written when W is pressed in the pools menu (d).
+# Written when W is pressed.
 
 # Pools in this order first, comma-separated; any other follows by name.
 pool_order = {}
 
 # Pools not shown.
 pool_hidden = {}
+
+# History the graphs span: 1m, 10m or 60m; empty for the default.
+window = {}
 ",
             self.pool_order.join(", "),
             self.pool_hidden.join(", "),
+            self.window.map(crate::app::window_label).unwrap_or_default(),
         )
     }
 
@@ -105,7 +117,7 @@ mod tests {
 
     #[test]
     fn rendered_config_parses_back() {
-        let c = Config { pool_order: vec!["fast".into(), "bulk".into()], pool_hidden: vec!["boot".into()] };
+        let c = Config { pool_order: vec!["fast".into(), "bulk".into()], pool_hidden: vec!["boot".into()], window: Some(600) };
         let (back, errors) = Config::parse(&c.render());
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(back, c);
@@ -121,5 +133,15 @@ mod tests {
         assert_eq!(c.rank(&["a", "b", "c", "d"]), [2, 0, 1, 3]);
         assert!(!c.shown("b"));
         assert!(c.shown("a"));
+    }
+
+    #[test]
+    fn window_parses_and_rejects() {
+        let (c, errors) = Config::parse("window = 60m");
+        assert!(errors.is_empty());
+        assert_eq!(c.window, Some(3600));
+        let (c, errors) = Config::parse("window = 5m");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(c.window, None);
     }
 }
