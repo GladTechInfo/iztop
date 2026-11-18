@@ -1,5 +1,5 @@
 //! Pool state: joins the iostat stream, the status feed and the disks' busy
-//! figures, and keeps history and the damped copies the bars are drawn from.
+//! figures, and keeps the history the graphs are drawn from.
 
 use crate::disks;
 use crate::zpool::{self, Feed, IoRow, IoStream, PoolStatus, VdevStatus};
@@ -7,22 +7,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-/// History columns, one per second of sampled time: ten minutes, whatever the
+/// History columns, one per second of sampled time: an hour, whatever the
 /// sampling rate.
-pub const HISTORY: usize = 600;
+pub const HISTORY: usize = 3600;
 
-/// Asymmetric damping, in the manner of a shock absorber: quick to compress,
-/// slow to rebound. A rising edge reaches the bar almost at once so a spike is
-/// never missed, whilst the fall is damped so the bar settles rather than
-/// flickering.
-///
-/// These are **time constants in seconds**, not fixed per-sample weights, so
-/// the feel is the same at any refresh rate.
-const ATTACK_RATIO: f64 = 3.0;
-pub const DEFAULT_DAMPING_S: f64 = 4.0;
+/// The spans the history graphs can show, in seconds; `w` steps through them.
+pub const WINDOWS: [usize; 3] = [60, 600, HISTORY];
 
-/// Percentage points below which a bar counts as having arrived.
-const SETTLED: f64 = 0.1;
+pub fn window_label(seconds: usize) -> String {
+    format!("{}m", seconds / 60)
+}
 
 /// How often health, errors and scrub progress are re-read.
 const STATUS_EVERY: Duration = Duration::from_secs(5);
@@ -30,41 +24,6 @@ const STATUS_EVERY: Duration = Duration::from_secs(5);
 const RESPAWN_AFTER: Duration = Duration::from_secs(5);
 /// Quiet time after which the rows received make a complete interval.
 const LULL: Duration = Duration::from_millis(150);
-
-/// Seconds-to-90% converted to the time constant the filter actually uses.
-pub fn damping_tau(seconds: f64) -> f64 {
-    (seconds.clamp(0.2, 30.0)) / std::f64::consts::LN_10
-}
-
-/// A figure with a damped display copy. The raw value is never altered, so
-/// `--once`, the history and every printed figure stay honest.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Damped {
-    pub raw: f64,
-    pub shown: f64,
-}
-
-impl Damped {
-    pub fn get(&self, smooth: bool) -> f64 {
-        if smooth {
-            self.shown
-        } else {
-            self.raw
-        }
-    }
-
-    /// One frame of the filter. Returns whether it is still visibly travelling.
-    fn glide(&mut self, dt: f64, attack: f64, decay: f64) -> bool {
-        let tau = if self.raw > self.shown { attack } else { decay };
-        self.shown += (self.raw - self.shown) * (1.0 - (-dt / tau).exp());
-        if (self.raw - self.shown).abs() < SETTLED {
-            self.shown = self.raw;
-            false
-        } else {
-            true
-        }
-    }
-}
 
 /// One column per second of sampled time: each column is the time-weighted
 /// mean of the samples in that second.
@@ -93,6 +52,22 @@ impl History {
     pub fn last(&self, n: usize) -> impl Iterator<Item = f64> + '_ {
         self.ring.iter().skip(self.ring.len().saturating_sub(n)).copied()
     }
+
+    /// The last `window` seconds as `n` columns, newest at the right. Each is
+    /// the highest second it covers, so a short burst survives a long window;
+    /// a column older than the history is `None`.
+    pub fn columns(&self, window: usize, n: usize) -> Vec<Option<f64>> {
+        let len = self.ring.len();
+        let per = window as f64 / n.max(1) as f64;
+        (0..n)
+            .map(|c| {
+                // Ages in seconds covered by column c, 0 the newest.
+                let lo = ((n - 1 - c) as f64 * per).floor() as usize;
+                let hi = (((n - c) as f64 * per).floor() as usize).max(lo + 1).min(len);
+                (lo..hi).map(|a| self.ring[len - 1 - a]).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,7 +90,8 @@ pub struct Vdev {
     pub dev: Option<String>,
     /// Busy %: the disk's own, or the busiest disk beneath.
     pub busy: Option<f64>,
-    pub bar: Damped,
+    /// Busy % per second.
+    pub hist: History,
 }
 
 impl Vdev {
@@ -183,7 +159,6 @@ pub struct App {
     prev_busy: HashMap<String, u64>,
     prev_busy_t: Option<Instant>,
     devs: HashMap<String, Option<String>>,
-    decay_tau: f64,
 }
 
 pub fn hostname() -> String {
@@ -208,14 +183,9 @@ impl App {
             prev_busy: HashMap::new(),
             prev_busy_t: None,
             devs: HashMap::new(),
-            decay_tau: damping_tau(DEFAULT_DAMPING_S),
         };
         a.spawn();
         a
-    }
-
-    pub fn set_damping(&mut self, seconds: f64) {
-        self.decay_tau = damping_tau(seconds);
     }
 
     fn spawn(&mut self) {
@@ -371,8 +341,13 @@ impl App {
                     },
                     _ => None,
                 };
-                let bar = pool.rows.iter().find(|v| v.key == io.name && v.depth == io.depth).map(|v| v.bar);
-                out.push(Vdev { key: io.name.clone(), depth: io.depth, kind, io: io.clone(), dev, busy, bar: bar.unwrap_or_default() });
+                let hist = pool
+                    .rows
+                    .iter_mut()
+                    .find(|v| v.key == io.name && v.depth == io.depth)
+                    .map(|v| std::mem::take(&mut v.hist))
+                    .unwrap_or_default();
+                out.push(Vdev { key: io.name.clone(), depth: io.depth, kind, io: io.clone(), dev, busy, hist });
             }
             // Anything with members shows its busiest disk: one saturated
             // disk holds up the whole vdev.
@@ -391,7 +366,9 @@ impl App {
                 out[i].busy = max;
             }
             for v in out.iter_mut() {
-                v.bar.raw = v.busy.unwrap_or(0.0);
+                if let Some(b) = v.busy {
+                    v.hist.add(b, interval);
+                }
             }
             pool.rows = out;
             pool.rd_hist.add(pool.read_bps(), interval);
@@ -399,35 +376,6 @@ impl App {
         }
         self.prev_busy = busy_ms;
         self.prev_busy_t = Some(now);
-    }
-
-    /// Advances the damped values toward the latest sample. Returns whether any
-    /// bar is still moving.
-    pub fn animate(&mut self, dt: f64) -> bool {
-        let decay = self.decay_tau;
-        let attack = decay / ATTACK_RATIO;
-        let mut moving = false;
-        for v in self.pools.iter_mut().flat_map(|p| p.rows.iter_mut()) {
-            moving |= v.bar.glide(dt, attack, decay);
-        }
-        moving
-    }
-
-    pub fn snap(&mut self) {
-        for v in self.pools.iter_mut().flat_map(|p| p.rows.iter_mut()) {
-            v.bar.shown = v.bar.raw;
-        }
-    }
-
-    /// What the animated bars would show, reduced to eighth-cells, so a gliding
-    /// frame that moves nothing visibly is not drawn. Errs towards drawing.
-    pub fn motion_signature(&self, width: u16) -> Vec<i64> {
-        let cells = (width as f64 / 3.0).max(8.0);
-        self.pools
-            .iter()
-            .flat_map(|p| p.rows.iter())
-            .map(|v| (v.bar.shown / 100.0 * cells * 8.0).round() as i64)
-            .collect()
     }
 }
 
@@ -444,7 +392,7 @@ mod tests {
             io: IoRow::default(),
             dev: None,
             busy: None,
-            bar: Damped::default(),
+            hist: History::default(),
         };
         assert_eq!(v("/dev/disk/by-id/ata-ST8000VN004-2M2101_WKD0A1B2-part1", Kind::Disk).short_name(false), "ST8000VN004-2M2101_WKD0A1B2");
         assert_eq!(v("/dev/disk/by-id/ata-X-part1", Kind::Disk).short_name(true), "ata-X-part1");
@@ -453,13 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn damping_is_quick_up_and_slow_down() {
-        let tau = damping_tau(DEFAULT_DAMPING_S);
-        let mut d = Damped { raw: 100.0, shown: 0.0 };
-        d.glide(0.5, tau / ATTACK_RATIO, tau);
-        let up = d.shown;
-        let mut e = Damped { raw: 0.0, shown: 100.0 };
-        e.glide(0.5, tau / ATTACK_RATIO, tau);
-        assert!(up > 100.0 - e.shown);
+    fn columns_keep_peaks_and_leave_the_unknown_empty() {
+        let mut h = History::default();
+        for v in [1.0, 2.0, 9.0, 4.0, 5.0, 6.0] {
+            h.add(v, 1.0);
+        }
+        // Six seconds over three columns of two: the higher of each pair.
+        assert_eq!(h.columns(6, 3), [Some(2.0), Some(9.0), Some(6.0)]);
+        // A window longer than the history: older columns are empty.
+        assert_eq!(h.columns(12, 3), [None, Some(2.0), Some(9.0)]);
+        // More columns than seconds: each second is stretched.
+        assert_eq!(h.columns(2, 4), [Some(5.0), Some(5.0), Some(6.0), Some(6.0)]);
     }
 }

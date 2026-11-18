@@ -41,15 +41,15 @@ disks. ZFS's own `zpool iostat -v` command prints how much each vdev and disk is
 but as a scrolling wall of numbers.
 
 iztop runs that command for you and draws its figures as a live, readable screen: one box per pool,
-one row per vdev and disk, with a bar showing how busy each disk is, coloured from green to red.
+one row per vdev and disk, with a graph of how busy each disk has been, coloured from green to red.
 It adds what `iostat` does not show — health, error counters, capacity, fragmentation and scrub
-progress — and a ten-minute bandwidth graph.
+progress — and a bandwidth graph. Graphs span the last minute, ten minutes or hour.
 
 ### The problem it solves
 
 | Question | How iztop answers it |
 |---|---|
-| Which disk is holding the pool back? | A **busy** bar per disk, from the kernel's own block-layer accounting. A mirror or raidz row shows its busiest disk. |
+| Which disk is holding the pool back? | A **busy** history graph per disk, from the kernel's own block-layer accounting. A mirror or raidz row shows its busiest disk. |
 | Is the pool healthy? | Health in the box title; any vdev or disk that is not ONLINE, or has errors, is named in red on its row. |
 | How long will the scrub take? | Scrub or resilver progress, rate and time left in the box title. |
 | How fast is it reading and writing, and how long does each I/O wait? | Operations, bandwidth and latency per row, exactly as `zpool iostat` measures them. |
@@ -69,12 +69,12 @@ progress — and a ten-minute bandwidth graph.
 | Feature | Description |
 |---|---|
 | **Per-pool boxes** | One box per pool, one row per vdev and disk, laid out as `zpool iostat -v` lays them out. |
-| **Busy bars** | The share of time each disk had I/O in flight, from `/proc/diskstats`. A mirror, raidz or pool row shows its busiest disk. |
+| **Busy history** | A one-row graph per disk of the share of time it had I/O in flight, from `/proc/diskstats`, over the last 1, 10 or 60 minutes. A mirror, raidz or pool row shows its busiest disk. |
 | **iostat figures** | Read and write operations, bandwidth and latency (total wait) per row, over the refresh interval. |
 | **Health and errors** | Pool health in the title; a vdev or disk that is not ONLINE, or has READ/WRITE/CKSUM errors, is shown in red on its row. |
 | **Capacity and fragmentation** | A capacity gauge, allocated and total size, and fragmentation in each title. |
 | **Scrub and resilver** | Progress, rate and time left while one runs; errors found afterwards. |
-| **Bandwidth graph** | Ten minutes of read and write for one pool; follows the busiest pool unless you choose one. |
+| **Bandwidth graph** | Read and write for one pool over the same 1, 10 or 60 minutes; follows the busiest pool unless you choose one. |
 | **Pools menu** | Order pools, show or hide them, and save the choice. |
 | **Narrow-friendly** | Latency, then operations, are dropped as the terminal narrows; long disk names keep their serial number. |
 | **Scripting** | `--once` prints one interval as a plain-text table. |
@@ -96,7 +96,7 @@ they are the disks' model and serial numbers. Nothing has been edited.
 ![iztop: annotated interface](docs/images/iztop-interface-annotated.png)
 
 **A degraded pool** — one disk of `tank` was taken offline: the title and rows turn red, and the
-offline disk's bar is empty.
+offline disk's graph is empty.
 
 ![iztop: degraded pool](docs/images/iztop-degraded.png)
 
@@ -365,7 +365,7 @@ default), because every figure is a rate over that interval. Press `?` for help 
 1. Start a scrub: `sudo zpool scrub tank`.
 2. Run `sudo iztop tank`.
 3. The pool's title shows `scrub 12.2% 276M/s 0m 28s left`: progress, current rate and estimated
-   time remaining. The busy bars show whether every disk is working evenly; one disk much busier
+   time remaining. The busy graphs show whether every disk is working evenly; one disk much busier
    than its partners is the one limiting the scrub.
 4. When the scrub ends, the progress disappears from the title; if it found errors, the title says
    `scrub N errors` in red.
@@ -382,7 +382,8 @@ shown.
 | `no pools` | No pool is imported. `zpool list` should show the same. |
 | `every pool is hidden: d to choose` | All pools are hidden in the configuration. Press `d`, then `r` to show them all. |
 | No health, error or scrub figures | OpenZFS is older than 2.3, which lacks `zpool status -j`. Health still comes from `zpool list`. |
-| A disk's bar is an empty dotted track | The vdev is a file, not a block device, so there is no busy figure for it. |
+| A disk's graph is an empty dotted track for its whole width | The vdev is a file, not a block device, so there is no busy figure for it. |
+| The left of every graph is blank | iztop has not been running for the whole window yet; history starts when iztop does. |
 | Columns are missing | The terminal is too narrow: latency is dropped first, then operations. Widen the window. |
 | Squares or question marks instead of icons | The terminal font lacks Nerd Font glyphs. Install a [Nerd Font](https://www.nerdfonts.com/) or use `--no-icons`. |
 | `Illegal instruction` from a binary you built | Your Rust standard library contains AVX-512; see [Static builds](#static-builds). |
@@ -430,6 +431,7 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 | `g` | Graph mode | Cycles: *when there is room* (default) → *on* → *off*. The header confirms the mode. |
 | `n`, `b` | Next or previous pool | Graphs the next or previous pool in display order; turns the graph on if it was off. |
 | `a` | Busiest pool | Returns the graph to following the busiest pool. |
+| `w` | History window | Cycles the span of every graph: the last *1 minute* (default) → *10 minutes* → *60 minutes*. |
 
 ![The bandwidth graph after n](docs/images/iztop-graph-next-pool.png)
 
@@ -439,7 +441,6 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 
 | Key | Action | Explanation |
 |---|---|---|
-| `s` | Damping on or off | Damped bars (rise fast, fall slowly) or raw bars. |
 | `i` | Icons or ASCII | Nerd Font glyphs or plain ASCII markers. |
 
 ![iztop with ASCII markers](docs/images/iztop-ascii.png)
@@ -470,16 +471,16 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 |---|---|---|
 | 1 | **Header** | Host name, clock, refresh interval, number of pools, and messages after a key press. |
 | 2 | **Column legend** | The names of the figure columns on the right of every row. |
-| 3 | **Bandwidth graph** | Ten minutes of read and write bandwidth for one pool. |
+| 3 | **Bandwidth graph** | Read and write bandwidth for one pool over the history window. |
 | 4 | **Pool title** | Pool name, health, scrub or resilver progress, capacity and fragmentation. |
 | 5 | **Layout** | The pool, its vdevs and their disks, indented as in `zpool status`. |
-| 6 | **Busy bars** | How busy each disk was during the last interval. |
+| 6 | **Busy history** | How busy each disk has been over the history window. |
 | 7 | **Figures** | Busy %, operations, bandwidth and latency. |
 
 ### Colours
 
-Bars are coloured cell by cell along a ramp from green through amber to red, so a bar's colour at
-its tip says how full it is. The dotted part is the empty track. Latency is coloured on a
+Gauges and graph columns are coloured along a ramp from green through amber to red, so a column's
+colour says how high it is. The dotted part of a graph is idle time; blank is time before iztop started. Latency is coloured on a
 logarithmic scale: 100 µs and below is green, about 10 ms (an ordinary hard-disk access) amber, and
 a second red. Anything unhealthy is red.
 
@@ -495,8 +496,8 @@ pools shown. After a key press it shows a short confirmation such as `graph: on`
 
 | Item | Meaning |
 |---|---|
-| Title | `bandwidth`, the pool graphed, its position among the pools (`3/3`) and the keys `b` `n`. |
-| `read` (top) | Read bandwidth now, the peak and the mean over the stretch shown; the read graph grows upwards. |
+| Title | `bandwidth`, the pool graphed, the history window (`last 10m`), its position among the pools (`3/3`) and the keys `b` `n`. |
+| `read` (top) | Read bandwidth now, the peak and the mean over the window; the read graph grows upwards. |
 | `write` (bottom) | The same for writes; the write graph hangs downwards. |
 
 Both halves share one scale, the highest rate in view, but never less than 1 MiB/s, so a pool at
@@ -538,18 +539,21 @@ name gives way to them.
 *One disk offline: the pool and its raidz vdev read DEGRADED and the disk OFFLINE, truncated to fit
 the name column.*
 
-### Busy bars (6)
+### Busy history (6)
 
-The bar is the share of the interval during which the disk had at least one I/O in flight, read from
+The graph shows, second by second, the share of time during which the disk had at least one I/O in flight, read from
 the kernel's block-layer accounting for the **whole disk** (for a partition, its parent disk). A
 mirror, raidz or pool row shows its **busiest** disk, because one saturated disk holds up the rest.
-A busy bar near 100 % with low bandwidth usually means many small, slow operations.
+The newest second is at the right. iztop keeps an hour; `w` chooses whether the graph spans the
+last 1, 10 or 60 minutes, and the legend above the graphs says which (`busy, last 1m`). When a
+column covers more than one second it shows the **busiest** of them, so a short burst is not lost in a
+long window. Busy near 100 % with low bandwidth usually means many small, slow operations.
 
 ### Figures (7)
 
 | Column | Meaning | Unit |
 |---|---|---|
-| **busy** | As the bar. | % |
+| **busy** | Over the last interval: the graph's newest second. | % |
 | **r ops**, **w ops** | Read and write operations per second. | operations/s (`k` = thousands) |
 | **read**, **write** | Read and write bandwidth. | bytes/s (`K`, `M`, `G` binary) |
 | **r lat**, **w lat** | Average **total wait** per operation: time queued in ZFS plus time at the disk. `-` when there were no operations. | `ns`, `us` (µs), `ms`, `s` |
@@ -565,7 +569,7 @@ the **latency** columns are dropped first, then the **operations** columns.
 |---|---|
 | **Measured by ZFS** (reported by `zpool iostat`, `status`, `list`) | Operations, bandwidth, latency, health, errors, size, allocation, fragmentation, scrub progress. |
 | **Calculated by iztop** | Busy % (milliseconds with I/O in flight ÷ interval), the busiest-disk figure for vdev and pool rows, capacity %, scrub rate and time left, graph peak and mean. |
-| **Display only** | Damped bar lengths. |
+| **Display only** | Graph columns: the busiest second each covers. |
 
 ---
 
@@ -579,13 +583,11 @@ the **latency** columns are dropped first, then the **operations** columns.
 | `-i`, `--interval <MS>` | Refresh interval in milliseconds, 250–10000. | 1000 |
 | `-l`, `--vdevs-only` | Hide the disks inside mirrors and raidz vdevs. | disks shown |
 | `-g`, `--graph <MODE>` | Bandwidth graph: `auto` (when there is room), `on`, `off`. | `auto` |
+| `-w`, `--window <SPAN>` | History the graphs span: `1m`, `10m` or `60m`. | `1m` |
 | `--full-names` | Full device names, not shortened ones. | short |
 | `--once` | Print one interval as plain text and exit. | |
-| `--no-smooth` | Raw, undamped bars. | damped |
 | `--no-icons` | ASCII markers instead of Nerd Font glyphs. | icons |
 | `--no-clock` | No clock in the header. | clock |
-| `--damping <SEC>` | Seconds for a bar to fall by about 90 %, 0.2–30. | 4 |
-| `--fps <N>` | Animation frame rate, 5–240. | 60 |
 | `-c`, `--config <FILE>` | Configuration file. | `~/.config/iztop/iztop.conf` |
 | `-V`, `--version` | Print the version and exit. | |
 | `-h`, `--help` | Print the help text and exit. | |
@@ -636,7 +638,7 @@ tank                                       ONLINE        -   43.8    44447      
 | `name` | Indented by depth, as in `zpool status`. |
 | `state` | The row's state. |
 | `dev` | The kernel block device whose busy figure is used, or `-`. |
-| `busy%` | As the busy bar. |
+| `busy%` | Busy over the interval, as the **busy** column. |
 | `r_ops`, `w_ops` | Operations per second. |
 | `r_bytes_s`, `w_bytes_s` | Bytes per second. |
 | `r_wait_ns`, `w_wait_ns` | Total wait per operation, in nanoseconds; `-` with no operations. |
@@ -667,10 +669,10 @@ iztop is a single Rust binary of about 3,300 lines in nine modules, with
 | `zpool.rs` | Everything read from the `zpool` command: two feeds, each on its own thread. |
 | `json.rs` | A small JSON reader for `zpool status -j` (no serialisation framework). |
 | `disks.rs` | Busy figures from `/proc/diskstats`. |
-| `app.rs` | Joins the iostat stream, the status feed and the busy figures; keeps history and damped values. |
+| `app.rs` | Joins the iostat stream, the status feed and the busy figures; keeps an hour of history per row and per pool. |
 | `config.rs` | The pools-menu configuration file. |
 | `clock.rs` | Local time from `/etc/localtime` (TZif), without a date library. |
-| `ui.rs` | Rendering with ratatui; bars and graphs are written cell by cell. |
+| `ui.rs` | Rendering with ratatui; gauges and graphs are written cell by cell. |
 | `theme.rs` | Colour ramp and glyphs, shared with igtop and istop. |
 
 ```mermaid
@@ -684,7 +686,7 @@ flowchart LR
     ST -->|thread 2| zp
     ST -.-> js[json.rs]
     DS --> dk[disks.rs]
-    zp --> app[app.rs<br/>intervals, busy, history, damping]
+    zp --> app[app.rs<br/>intervals, busy, history]
     dk --> app
     app --> ui[ui.rs] --> T[(terminal)]
     app --> once["--once text"]
@@ -713,10 +715,13 @@ layer counts, per device, the milliseconds during which it had I/O in flight (`/
 field 13); the change over an interval, divided by the interval, is its busy share. iztop maps each
 leaf vdev's device path to its kernel name, and reads the whole disk when the vdev is a partition.
 
-### Damping and drawing
+### History and drawing
 
-Bars rise quickly and fall slowly; the time constants are in seconds, so the feel does not depend on
-the refresh or frame rate. Figures and `--once` are always raw.
+Each row's busy figure and each pool's read and write bandwidth are stored as one value per second
+of sampled time (the time-weighted mean of the intervals in it), an hour deep, whatever the refresh
+interval. A graph `n` cells wide over a window of `w` seconds gives each cell `w ÷ n` seconds and
+draws the highest second among them. The screen is redrawn only when a new interval arrives or a
+key is pressed. Figures and `--once` are the interval's own.
 
 ### Permissions and safety
 

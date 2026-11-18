@@ -1,6 +1,6 @@
 //! iztop — ZFS pool I/O in the manner of `zpool iostat -v`, drawn in igtop's
 //! and istop's style: per-vdev operations, bandwidth and latency, how busy
-//! each disk is, pool health and scrub progress.
+//! each disk has been, pool health and scrub progress.
 //!
 //! Written entirely in Rust with no `unsafe`.
 
@@ -33,13 +33,11 @@ OPTIONS:
     -i, --interval <MS>   refresh interval in milliseconds (250-10000, default 1000)
     -l, --vdevs-only      hide the disks inside mirrors and raidz vdevs
     -g, --graph <MODE>    bandwidth graph: auto (when there is room), on, off
+    -w, --window <SPAN>   history the graphs span: 1m, 10m or 60m (default 1m)
         --full-names      full device names, not shortened ones
         --once            print a single plain-text sample and exit
-        --no-smooth       show raw values, undamped
         --no-icons        plain ASCII markers instead of Nerd Font glyphs
         --no-clock        no clock in the header
-        --damping <SEC>   seconds for a bar to fall ~90% (0.2-30)
-        --fps <N>         animation frame rate (5-240)
     -c, --config <FILE>   config file (default ~/.config/iztop/iztop.conf)
     -V, --version         version
     -h, --help            this text
@@ -57,7 +55,8 @@ FIGURES:
     BUSY is the share of the interval each disk had I/O in flight, from
     /proc/diskstats, read from the whole disk under a partition. A mirror,
     raidz or pool shows its busiest disk, since one saturated disk holds up
-    the rest.
+    the rest. Its graph keeps the last hour; each column is the busiest
+    second it covers. Press w to step between 1, 10 and 60 minutes.
 
     Health, READ/WRITE/CKSUM errors, fragmentation and scrub or resilver
     progress come from `zpool status -j` and `zpool list` every 5 seconds.
@@ -73,11 +72,10 @@ struct Args {
     graph: GraphMode,
     full_names: bool,
     once: bool,
-    smooth: bool,
     icons: bool,
     clock: bool,
-    damping: f64,
-    fps: u64,
+    /// Seconds of history the graphs span.
+    window: usize,
     config: Option<PathBuf>,
 }
 
@@ -89,11 +87,9 @@ fn parse_args() -> Result<Args, String> {
         graph: GraphMode::Auto,
         full_names: false,
         once: false,
-        smooth: true,
         icons: true,
         clock: true,
-        damping: app::DEFAULT_DAMPING_S,
-        fps: 60,
+        window: app::WINDOWS[0],
         config: None,
     };
     let mut it = std::env::args().skip(1);
@@ -120,23 +116,18 @@ fn parse_args() -> Result<Args, String> {
                     _ => return Err("--graph takes auto, on or off".into()),
                 }
             }
+            "-w" | "--window" => {
+                a.window = match it.next().as_deref() {
+                    Some("1m" | "60s") => 60,
+                    Some("10m") => 600,
+                    Some("60m" | "1h") => 3600,
+                    _ => return Err("--window takes 1m, 10m or 60m".into()),
+                }
+            }
             "--full-names" => a.full_names = true,
             "--once" => a.once = true,
-            "--no-smooth" => a.smooth = false,
             "--no-icons" => a.icons = false,
             "--no-clock" => a.clock = false,
-            "--damping" => {
-                let v = it.next().ok_or("--damping needs a value in seconds")?;
-                a.damping = v
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|d| d.is_finite())
-                    .ok_or("--damping must be a finite number of seconds")?;
-            }
-            "--fps" => {
-                let v = it.next().ok_or("--fps needs a value")?;
-                a.fps = v.parse::<u64>().map_err(|_| "--fps must be a number")?.clamp(5, 240);
-            }
             "-c" | "--config" => a.config = Some(PathBuf::from(it.next().ok_or("--config needs a file")?)),
             s if s.starts_with('-') => return Err(format!("unrecognised argument: {}", s)),
             pool => a.pools.push(pool.to_string()),
@@ -171,7 +162,6 @@ fn main() {
         std::process::exit(once(&args, &cfg));
     }
     let mut app = app::App::new(args.interval_ms, args.pools.clone());
-    app.set_damping(args.damping);
     let status = warnings.first().map(|w| format!("config {}", w));
     if let Err(e) = run_tui(&mut app, &args, cfg, path, status) {
         ratatui::restore();
@@ -261,7 +251,7 @@ fn once(args: &Args, cfg: &Config) -> i32 {
 }
 
 struct Ui {
-    smooth: bool,
+    window: usize,
     icons: bool,
     leaves: bool,
     full_names: bool,
@@ -302,7 +292,7 @@ fn run_tui(
 ) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let mut ui = Ui {
-        smooth: args.smooth,
+        window: args.window,
         icons: args.icons,
         leaves: args.leaves,
         full_names: args.full_names,
@@ -322,12 +312,8 @@ fn run_tui(
     }
     let zone = clock::Zone::local();
     let mut paused = false;
-    let mut last_frame = Instant::now();
     let mut last_clock = String::new();
-    let frame_budget = Duration::from_millis((1000 / args.fps).max(1));
     let mut dirty = true;
-    let mut moving = false;
-    let mut last_sig: Vec<i64> = Vec::new();
     let mut hit = ui::Hit::default();
 
     loop {
@@ -345,22 +331,7 @@ fn run_tui(
             dirty = true;
         }
 
-        // Animation runs on wall time, independent of the sampling interval.
-        let frame_dt = if moving { now.duration_since(last_frame) } else { frame_budget };
-        last_frame = now;
-        moving = false;
-        if !paused {
-            if ui.smooth {
-                moving = app.animate(frame_dt.as_secs_f64());
-            } else {
-                app.snap();
-            }
-        }
-
-        let size = terminal.size()?;
-        let sig = app.motion_signature(size.width);
-        if dirty || (moving && sig != last_sig) {
-            last_sig = sig;
+        if dirty {
             dirty = false;
             let order = display_order(app, &ui.cfg, ui.named);
             ui.offset = ui.offset.min(order.len().saturating_sub(1));
@@ -377,7 +348,7 @@ fn run_tui(
                 .collect();
             let view = ui::View {
                 app,
-                smooth: ui.smooth,
+                window: ui.window,
                 icons: ui.icons,
                 paused,
                 leaves: ui.leaves,
@@ -398,15 +369,8 @@ fn run_tui(
             crossterm::execute!(io::stdout(), EndSynchronizedUpdate)?;
         }
 
-        // Wake for the next frame while moving, otherwise often enough to
-        // pick up the next iostat block promptly.
-        let wait = if dirty {
-            Duration::ZERO
-        } else if moving {
-            frame_budget
-        } else {
-            Duration::from_millis(50)
-        };
+        // Often enough to pick up the next iostat block promptly.
+        let wait = if dirty { Duration::ZERO } else { Duration::from_millis(50) };
         if !event::poll(wait)? {
             continue;
         }
@@ -506,7 +470,11 @@ fn handle_key(k: KeyEvent, ui: &mut Ui, app: &mut app::App, paused: &mut bool, h
                 app.reset_rates();
             }
         }
-        KeyCode::Char('s') => ui.smooth = !ui.smooth,
+        KeyCode::Char('w') => {
+            let i = app::WINDOWS.iter().position(|&w| w == ui.window).map_or(0, |i| (i + 1) % app::WINDOWS.len());
+            ui.window = app::WINDOWS[i];
+            ui.say(format!("history: last {}", app::window_label(ui.window)), false);
+        }
         KeyCode::Char('i') => ui.icons = !ui.icons,
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('-') => {
             let cur = INTERVAL_STEPS.iter().position(|s| *s >= app.interval_ms).unwrap_or(2);

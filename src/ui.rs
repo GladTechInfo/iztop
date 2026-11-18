@@ -1,14 +1,14 @@
 //! Rendering.
 //!
-//! Bars and graphs are written straight into the frame buffer, cell by cell,
-//! as igtop and istop do: each cell of a bar gets its own colour from the ramp.
+//! Gauges and graphs are written straight into the frame buffer, cell by
+//! cell, as igtop and istop do: each cell gets its own colour from the ramp.
 //!
 //! One rounded box per pool and one row per vdev or disk, as `zpool iostat -v`
 //! lays them out, so the screen reads the same way. Columns are dropped from
 //! the right as the terminal narrows — latency first, then operations — so
 //! the tool fits a half-width pane.
 
-use crate::app::{App, Kind, Pool, Vdev};
+use crate::app::{window_label, App, Kind, Pool, Vdev};
 use crate::theme::*;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -26,7 +26,8 @@ pub type MenuItem = (String, String, bool);
 
 pub struct View<'a> {
     pub app: &'a App,
-    pub smooth: bool,
+    /// Seconds of history the graphs span.
+    pub window: usize,
     pub icons: bool,
     pub paused: bool,
     pub leaves: bool,
@@ -183,29 +184,34 @@ fn put_right(buf: &mut Buffer, right: u16, y: u16, parts: &[(String, Color)]) {
     }
 }
 
-/// The ramp colour of every cell along a bar `width` cells long.
+/// The ramp colour of every cell along a gauge `width` cells long.
 fn ramp_cells(width: usize) -> Vec<Color> {
     let span = (width.saturating_sub(1)).max(1) as f64;
     (0..width).map(|i| ramp(i as f64 / span)).collect()
 }
 
-/// A gradient bar `colours.len()` cells long, the tip an eighth-block for
-/// sub-cell resolution, the rest a dotted track.
-fn bar(buf: &mut Buffer, x: u16, y: u16, pct: f64, colours: &[Color]) {
-    let bw = colours.len();
-    let filled = (pct / 100.0 * bw as f64 * 8.0).round().max(0.0) as usize;
-    let full = (filled / 8).min(bw);
-    let rem = filled % 8;
-    for (i, &colour) in colours.iter().enumerate() {
-        let (sym, fg) = if i < full {
-            ("█", colour)
-        } else if i == full && rem > 0 {
-            (EIGHTHS[rem - 1], colour)
-        } else {
-            (TRACK_CH, TRACK)
-        };
-        if let Some(c) = buf.cell_mut((x + i as u16, y)) {
-            c.set_symbol(sym).set_fg(fg);
+/// A one-row history graph of percentages, a column per cell, newest at the
+/// right: an eighth-block per column, coloured by its height. An idle column
+/// is the dotted track; one from before the history began is left blank.
+fn spark(buf: &mut Buffer, x: u16, y: u16, cols: &[Option<f64>]) {
+    for (i, v) in cols.iter().enumerate() {
+        let Some(c) = buf.cell_mut((x + i as u16, y)) else { continue };
+        match v {
+            None => {
+                c.set_symbol(" ");
+            }
+            Some(v) => {
+                let v = v.clamp(0.0, 100.0);
+                let level = match (v / 100.0 * 8.0).round() as usize {
+                    0 if v > 0.0 => 1,
+                    l => l,
+                };
+                if level == 0 {
+                    c.set_symbol(TRACK_CH).set_fg(TRACK);
+                } else {
+                    c.set_symbol(VEIGHTHS[level - 1]).set_fg(ramp(v / 100.0));
+                }
+            }
         }
     }
 }
@@ -418,6 +424,9 @@ pub fn draw(f: &mut Frame, v: &View) -> Hit {
     // Legend, aligned with the figures inside the boxes.
     let legend_y = body.y;
     put_right(f.buffer_mut(), body.right().saturating_sub(2), legend_y, &cols.legend(&ic));
+    let label = format!("busy, last {}", window_label(v.window));
+    let gx = body.x + 2 + cols.name as u16 + 1;
+    put(f.buffer_mut(), gx, legend_y, cols.bar, &label, Style::default().fg(LABEL));
     let rest = Rect { y: body.y + 1, height: body.height - 1, ..body };
 
     let heights: Vec<u16> = pools.iter().map(|p| visible(p, v.leaves).count() as u16 + 2).collect();
@@ -528,9 +537,6 @@ fn draw_header(f: &mut Frame, area: Rect, v: &View) {
         format!("  {}{} pool{}", shown, n, if n == 1 { "" } else { "s" }),
         Style::default().fg(if shown.is_empty() { DIM } else { AMBER }),
     ));
-    if !v.smooth {
-        spans.push(Span::styled("  raw", Style::default().fg(AMBER)));
-    }
     if !v.leaves {
         spans.push(Span::styled("  vdevs only", Style::default().fg(AMBER)));
     }
@@ -619,7 +625,6 @@ fn draw_pool(f: &mut Frame, area: Rect, p: &Pool, cols: &Cols, v: &View) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let buf = f.buffer_mut();
-    let colours = ramp_cells(cols.bar);
     let right = inner.right().saturating_sub(1);
     for (row, r) in visible(p, v.leaves).enumerate() {
         let y = inner.y + row as u16;
@@ -667,10 +672,14 @@ fn draw_pool(f: &mut Frame, area: Rect, p: &Pool, cols: &Cols, v: &View) {
             continue;
         }
         let bx = x0 + cols.name as u16 + 1;
-        if r.busy.is_some() {
-            bar(buf, bx, y, r.bar.get(v.smooth), &colours);
+        if !r.hist.ring.is_empty() {
+            spark(buf, bx, y, &r.hist.columns(v.window, cols.bar));
+        } else if r.dev.is_some() {
+            // Not measured yet: busy needs two samples.
+            put(buf, bx, y, cols.bar, &" ".repeat(cols.bar), Style::default());
         } else {
-            // No block device to read (a file vdev): a bare track.
+            // No block device to read (a file vdev), or nothing beneath
+            // measured yet: a bare track.
             put(buf, bx, y, cols.bar, &TRACK_CH.repeat(cols.bar), Style::default().fg(TRACK));
         }
         put_right(buf, right, y, &cols.figures(r));
@@ -699,6 +708,7 @@ fn draw_graph(f: &mut Frame, area: Rect, v: &View) {
         Span::styled("bandwidth", Style::default().fg(TITLE).add_modifier(Modifier::BOLD)),
         Span::styled(" · ", Style::default().fg(DIM)),
         Span::styled(p.name.as_str(), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" · last {}", window_label(v.window)), Style::default().fg(DIM)),
         Span::styled(
             format!(
                 "  {}/{}  b n ",
@@ -714,12 +724,18 @@ fn draw_graph(f: &mut Frame, area: Rect, v: &View) {
     if inner.height < 4 || inner.width < 20 {
         return;
     }
-    let w = inner.width.saturating_sub(3) as usize;
-    let rd: Vec<f64> = p.rd_hist.last(w).collect();
-    let wr: Vec<f64> = p.wr_hist.last(w).collect();
+    let w = inner.width.saturating_sub(2) as usize;
+    // Columns before the history began are NaN, which draws nothing.
+    let column = |h: &crate::app::History| -> Vec<f64> {
+        h.columns(v.window, w).into_iter().map(|c| c.unwrap_or(f64::NAN)).collect()
+    };
+    let (rd_cols, wr_cols) = (column(&p.rd_hist), column(&p.wr_hist));
+    // Peak and mean over every second in the window, not the columns.
+    let rd: Vec<f64> = p.rd_hist.last(v.window).collect();
+    let wr: Vec<f64> = p.wr_hist.last(v.window).collect();
     // One scale for both halves, floored at 1 MiB/s so a pool at rest is not
-    // drawn as busy.
-    let scale = rd.iter().chain(wr.iter()).copied().fold(1024.0 * 1024.0, f64::max);
+    // drawn as busy. f64::max passes over NaN.
+    let scale = rd_cols.iter().chain(wr_cols.iter()).copied().fold(1024.0 * 1024.0, f64::max);
     let half = (inner.height.saturating_sub(2)) / 2;
     let rows = Layout::vertical([
         Constraint::Length(1),
@@ -746,8 +762,8 @@ fn draw_graph(f: &mut Frame, area: Rect, v: &View) {
     f.render_widget(Paragraph::new(label(ic.read, MINT, "read", p.read_bps(), &rd)), rows[0]);
     let buf = f.buffer_mut();
     let g = |r: Rect| Rect { x: r.x + 1, width: r.width.saturating_sub(2), ..r };
-    graph(buf, g(rows[1]), &rd.iter().map(|b| b / scale).collect::<Vec<_>>(), true);
-    graph(buf, g(rows[2]), &wr.iter().map(|b| b / scale).collect::<Vec<_>>(), false);
+    graph(buf, g(rows[1]), &rd_cols.iter().map(|b| b / scale).collect::<Vec<_>>(), true);
+    graph(buf, g(rows[2]), &wr_cols.iter().map(|b| b / scale).collect::<Vec<_>>(), false);
     f.render_widget(Paragraph::new(label(ic.write, AMBER, "write", p.write_bps(), &wr)), rows[3]);
 }
 
@@ -764,15 +780,15 @@ pub const HELP: [(&str, &str); 14] = [
     ("a", "graph: follow the busiest pool"),
     ("p", "full device names or short ones"),
     ("+  -", "slower or faster refresh"),
+    ("w", "history: last 1, 10 or 60 minutes"),
     ("Space", "pause"),
-    ("s", "damped or raw bars"),
     ("i", "icons or ASCII"),
     ("?", "this help"),
 ];
 
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 64.min(area.width);
-    let h = (HELP.len() as u16 + 8).min(area.height);
+    let h = (HELP.len() as u16 + 9).min(area.height);
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     f.render_widget(Clear, r);
     let block = boxed(vec![Span::styled(" help ", Style::default().fg(TITLE).add_modifier(Modifier::BOLD))]);
@@ -790,7 +806,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
     lines.push(Line::raw(""));
     for t in [
         "  busy: share of time the disk had I/O in flight; a vdev",
-        "  shows its busiest disk. lat: total wait, queue and disk.",
+        "  shows its busiest disk. Each column of its graph is the",
+        "  busiest second it covers. lat: total wait, queue and disk.",
         "  Errors are READ/WRITE/CKSUM, as zpool status counts them.",
     ] {
         lines.push(Line::from(Span::styled(t, Style::default().fg(DIM))));
