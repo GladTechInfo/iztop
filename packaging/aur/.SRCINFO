@@ -1,6 +1,6 @@
 pkgbase = iztop
 	pkgdesc = Terminal ZFS pool I/O monitor: per-vdev operations, bandwidth, latency, disk busy, health and scrub progress
-	pkgver = 0.2.0
+	pkgver = 0.2.1
 	pkgrel = 1
 	url = https://github.com/GladTechInfo/iztop
 	arch = x86_64
@@ -10,7 +10,7 @@ pkgbase = iztop
 	depends = glibc
 	optdepends = zfs-utils: the zpool command iztop reads its figures from
 	options = !debug
-	source = iztop-0.2.0.tar.gz::https://github.com/GladTechInfo/iztop/archive/refs/tags/v0.2.0.tar.gz
-	sha256sums = 557bfa83169e582ee9fb39f375ee588eb3077818e34446da1cf393964d276aa0
+	source = iztop-0.2.1.tar.gz::https://github.com/GladTechInfo/iztop/archive/refs/tags/v0.2.1.tar.gz
+	sha256sums = 6aca9774d9542cac2f44bd7d5b1d71db40c3ac83a61a5da20d29c7a89d4c62ae
 
 pkgname = iztop
