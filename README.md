@@ -108,20 +108,28 @@ offline disk's graph is empty.
 
 ## 4. Quick Start
 
-On **Debian, Ubuntu or Proxmox VE** with ZFS already set up, the quickest way is the ready-made
-package from the latest release:
+On any x86-64 Linux, one command installs the latest release:
 
 ```sh
-ver=$(curl -s https://api.github.com/repos/GladTechInfo/iztop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
-curl -LO "https://github.com/GladTechInfo/iztop/releases/download/v$ver/iztop_${ver}-1_amd64.deb"
-sudo apt install "./iztop_${ver}-1_amd64.deb"
-sudo iztop          # start the monitor; q quits, ? lists every key
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/GladTechInfo/iztop/main/install.sh)"
+sudo iztop             # start the monitor; q quits, ? lists every key
 ```
 
-The first line asks GitHub for the latest version number; the second downloads that version's
-package; the third installs it.
+The [install script](install.sh) picks the release file for your system — the `.deb` on Debian,
+Ubuntu and Proxmox VE, the `.rpm` on Fedora, RHEL and openSUSE, the static binary in
+`/usr/local/bin` everywhere else, Arch Linux and Alpine included — checks it against the release's
+`SHA256SUMS` and installs it, using `sudo` when you are not root. It prints each command it runs.
+iztop needs ZFS already set up — see [Requirements](#51-requirements).
 
-For every other distribution, see [Installation](#5-installation).
+Run the same command again to update. To remove iztop:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/GladTechInfo/iztop/main/install.sh | sh -s -- --uninstall
+```
+
+The script also takes `--version X.Y.Z` (a particular release), `--method deb|rpm|bin` (another
+file than the one it picks) and `--bindir DIR` (where the static binary goes), after `sh -s --` as
+above. To do each step by hand, or to build from source, see [Installation](#5-installation).
 
 ---
 
@@ -314,6 +322,7 @@ static binary that runs on other machines, see [Static builds](#static-builds).
 
 | Installed with | How to update |
 |---|---|
+| Install script | Run the install command again. |
 | `.deb` package | Download the newer `.deb` and install it the same way; `apt` replaces the old version. |
 | `.rpm` package | Download the newer `.rpm` and install it the same way. |
 | `makepkg` (Arch, CachyOS) | `cd iztop && git pull && cd packaging/aur && makepkg -si` |
@@ -324,6 +333,7 @@ static binary that runs on other machines, see [Static builds](#static-builds).
 
 | Installed with | How to remove |
 |---|---|
+| Install script | `curl -fsSL https://raw.githubusercontent.com/GladTechInfo/iztop/main/install.sh \| sh -s -- --uninstall` |
 | `.deb` package | `sudo apt remove iztop` |
 | `.rpm` package (Fedora, RHEL) | `sudo dnf remove iztop` |
 | `.rpm` package (openSUSE) | `sudo zypper remove iztop` |

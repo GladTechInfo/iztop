@@ -19,3 +19,28 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: ./build.sh
+
+  # The install script, in containers of the distributions it serves: install
+  # the latest release, check that iztop starts, and remove it again.
+  install-script:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:13", "ubuntu:24.04", "fedora:latest", "rockylinux:9", "opensuse/tumbleweed", "archlinux:latest", "alpine:latest"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Give the container curl, where it has neither curl nor wget
+        run: |
+          if command -v curl >/dev/null || command -v wget >/dev/null; then exit 0; fi
+          if command -v apt-get >/dev/null; then apt-get update -qq && apt-get install -y -qq curl ca-certificates; fi
+          if command -v zypper >/dev/null; then zypper --non-interactive install curl; fi
+      - name: Install
+        run: sh install.sh
+      - name: Run
+        run: iztop --version
+      - name: Remove
+        run: |
+          sh install.sh --uninstall
+          ! command -v iztop
