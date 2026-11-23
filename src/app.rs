@@ -2,7 +2,7 @@
 //! figures, and keeps the history the graphs are drawn from.
 
 use crate::disks;
-use crate::zpool::{self, Feed, IoRow, IoStream, PoolStatus, VdevStatus};
+use crate::zpool::{self, Feed, IoRow, IoStream, PoolStatus, Space, VdevStatus};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -159,6 +159,41 @@ pub struct Pool {
 impl Pool {
     pub fn vdev_status(&self, key: &str) -> Option<&VdevStatus> {
         self.status.as_ref().and_then(|s| s.vdevs.get(key))
+    }
+
+    /// A row's space for the capacity view. The pool row takes `zpool list`'s
+    /// pool line, the figures the box title shows; a vdev or disk its own
+    /// line of `zpool list -v`. Without those (an older zpool), a vdev falls
+    /// back on iostat's alloc and free, and a disk has nothing.
+    pub fn space(&self, r: &Vdev) -> Option<Space> {
+        let st = self.status.as_ref();
+        if r.kind == Kind::Pool {
+            if let Some(s) = st.filter(|s| s.size > 0) {
+                return Some(Space {
+                    size: s.size,
+                    alloc: Some(s.alloc),
+                    free: Some(s.size.saturating_sub(s.alloc)),
+                    frag: s.frag,
+                    // Truncated, as zpool list's CAP is.
+                    cap: Some(s.alloc * 100 / s.size),
+                });
+            }
+        } else if let Some(sp) = st.and_then(|s| s.space.get(&r.key)) {
+            return Some(sp.clone());
+        }
+        // A disk inside a mirror or raidz reports 0 and 0; one that is itself
+        // a top-level vdev reports its own figures.
+        let own = r.kind != Kind::Disk || r.depth < 2;
+        match (r.io.alloc, r.io.free) {
+            (Some(a), Some(f)) if own && a + f > 0 => Some(Space {
+                size: a + f,
+                alloc: Some(a),
+                free: Some(f),
+                frag: None,
+                cap: Some(a * 100 / (a + f)),
+            }),
+            _ => None,
+        }
     }
 
     pub fn read_bps(&self) -> f64 {

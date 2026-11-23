@@ -35,6 +35,9 @@ OPTIONS:
     -g, --graph <MODE>    bandwidth graph: auto (when there is room), on, off
     -w, --window <SPAN>   history the graphs span: 1m, 10m or 60m (default 1m,
                           or as saved in the config file)
+        --view <VIEW>     io (operations, bandwidth, latency, busy) or
+                          capacity (space used per vdev); default io, or as
+                          saved in the config file
         --full-names      full device names, not shortened ones
         --once            print a single plain-text sample and exit
         --no-icons        plain ASCII markers instead of Nerd Font glyphs
@@ -44,8 +47,9 @@ OPTIONS:
     -h, --help            this text
 
 With no POOL, every imported pool is shown, except those hidden in the
-config file. Press d in iztop to order, show or hide pools, and W to save
-the pools and the history window to the config file. Pools named on the
+config file. Press d in iztop to order, show or hide pools, c to switch
+between the I/O and capacity views, and W to save the pools, the view and
+the history window to the config file. Pools named on the
 command line are shown whether hidden or not, in the configured order.
 
 FIGURES:
@@ -62,6 +66,11 @@ FIGURES:
     Health, READ/WRITE/CKSUM errors, fragmentation and scrub or resilver
     progress come from `zpool status -j` and `zpool list` every 5 seconds.
     Capacity is raw, parity included, as zpool list and iostat count it.
+
+    The capacity view reads `zpool list -v` every 5 seconds: allocated,
+    free, size, fragmentation and percentage used for each pool and
+    top-level vdev. ZFS keeps no allocation for a disk inside a mirror or
+    raidz, so a disk shows its size and device name only.
 ";
 
 const INTERVAL_STEPS: [u64; 6] = [250, 500, 1000, 2000, 5000, 10_000];
@@ -77,6 +86,8 @@ struct Args {
     clock: bool,
     /// Seconds of history the graphs span, if given.
     window: Option<usize>,
+    /// The capacity view, if --view was given.
+    capacity: Option<bool>,
     config: Option<PathBuf>,
 }
 
@@ -91,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
         icons: true,
         clock: true,
         window: None,
+        capacity: None,
         config: None,
     };
     let mut it = std::env::args().skip(1);
@@ -120,6 +132,11 @@ fn parse_args() -> Result<Args, String> {
             "-w" | "--window" => {
                 a.window = Some(
                     it.next().as_deref().and_then(app::parse_window).ok_or("--window takes 1m, 10m or 60m")?,
+                )
+            }
+            "--view" => {
+                a.capacity = Some(
+                    it.next().as_deref().and_then(config::parse_view).ok_or("--view takes io or capacity")?,
                 )
             }
             "--full-names" => a.full_names = true,
@@ -253,6 +270,7 @@ struct Ui {
     icons: bool,
     leaves: bool,
     full_names: bool,
+    capacity: bool,
     graph: GraphMode,
     /// None: follow the busiest pool.
     graph_pool: Option<String>,
@@ -294,6 +312,7 @@ fn run_tui(
         icons: args.icons,
         leaves: args.leaves,
         full_names: args.full_names,
+        capacity: args.capacity.or(cfg.capacity).unwrap_or(false),
         graph: args.graph,
         graph_pool: None,
         offset: 0,
@@ -351,6 +370,7 @@ fn run_tui(
                 paused,
                 leaves: ui.leaves,
                 full_names: ui.full_names,
+                capacity: ui.capacity,
                 graph: ui.graph,
                 graph_pool,
                 order: &order,
@@ -427,6 +447,10 @@ fn handle_key(k: KeyEvent, ui: &mut Ui, app: &mut app::App, paused: &mut bool, h
             ui.say(if ui.leaves { "disks shown" } else { "vdevs only" }, false);
         }
         KeyCode::Char('p') => ui.full_names = !ui.full_names,
+        KeyCode::Char('c') => {
+            ui.capacity = !ui.capacity;
+            ui.say(if ui.capacity { "capacity view" } else { "I/O view" }, false);
+        }
         KeyCode::Char('g') => {
             ui.graph = match ui.graph {
                 GraphMode::Auto => GraphMode::On,
@@ -544,14 +568,15 @@ fn move_pool(ui: &mut Ui, c: usize, by: isize) {
     ui.menu = Some(to as usize);
 }
 
-/// `W`: the pool order, hidden pools and history window, written to the
-/// config file on request only.
+/// `W`: the pool order, hidden pools, view and history window, written to
+/// the config file on request only.
 fn save(ui: &mut Ui) {
     let Some(path) = ui.path.clone() else {
         ui.say("no config path: HOME is not set", true);
         return;
     };
     ui.cfg.window = Some(ui.window);
+    ui.cfg.capacity = Some(ui.capacity);
     match ui.cfg.save(&path) {
         Ok(()) => ui.say(format!("saved {}", path.display()), false),
         Err(e) => ui.say(format!("save failed: {}", e), true),

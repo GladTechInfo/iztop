@@ -9,6 +9,7 @@
 //! the tool fits a half-width pane.
 
 use crate::app::{window_label, App, Kind, Pool, Vdev};
+use crate::zpool::Space;
 use crate::theme::*;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -32,6 +33,8 @@ pub struct View<'a> {
     pub paused: bool,
     pub leaves: bool,
     pub full_names: bool,
+    /// The capacity view in place of the I/O figures.
+    pub capacity: bool,
     pub graph: GraphMode,
     /// The pool the graph follows, an index into `app.pools`.
     pub graph_pool: Option<usize>,
@@ -236,6 +239,16 @@ fn gauge_spans(pct: f64, cells: usize) -> Vec<Span<'static>> {
         .collect()
 }
 
+/// A gauge drawn straight into the buffer, `cells` wide, coloured along the
+/// ramp as the title gauge is.
+fn gauge(buf: &mut Buffer, x: u16, y: u16, cells: usize, pct: f64) {
+    for (i, span) in gauge_spans(pct, cells).into_iter().enumerate() {
+        if let Some(c) = buf.cell_mut((x + i as u16, y)) {
+            c.set_symbol(&span.content).set_style(span.style);
+        }
+    }
+}
+
 /// A filled area graph, newest column at the right edge, as istop's network
 /// graph: `up` grows from the bottom, otherwise it hangs from the top.
 fn graph(buf: &mut Buffer, area: Rect, data: &[f64], up: bool) {
@@ -291,8 +304,14 @@ fn dim(s: impl Into<String>) -> (String, Color) {
 /// legend and every row agree.
 #[derive(Clone, Copy)]
 struct Cols {
+    /// The capacity view: alloc, free, size, frag and used in place of
+    /// the I/O figures, and a gauge in place of the busy graph.
+    capacity: bool,
     ops: bool,
     lat: bool,
+    /// Capacity view: free and frag drop, in that order, as width shrinks.
+    free: bool,
+    frag: bool,
     /// Indent, glyph and name.
     name: usize,
     bar: usize,
@@ -303,10 +322,18 @@ const OPS_W: usize = 13; // "  rrrrr wwwww"
 const BW_W: usize = 15; // "  rrrrrr wwwwww"
 const LAT_W: usize = 13; // "  rrrrr wwwww"
 const NAME_MIN: usize = 12;
+const ALLOC_W: usize = 8; // "  aaaaaa"
+const FREE_W: usize = 7; // " ffffff"
+const SIZE_W: usize = 7; // " ssssss"
+const FRAG_W: usize = 6; // "  fff%"
+const USED_W: usize = 6; // "  uuu%"
 const BAR_MIN: usize = 6;
 
 impl Cols {
-    fn new(inner_w: usize, longest_name: usize) -> Cols {
+    fn new(inner_w: usize, longest_name: usize, capacity: bool) -> Cols {
+        if capacity {
+            return Cols::new_capacity(inner_w, longest_name);
+        }
         // One cell of margin either side, one between name and bar.
         let room = |ops: bool, lat: bool| {
             inner_w as isize
@@ -326,7 +353,68 @@ impl Cols {
         let left = room(ops, lat).max(0) as usize;
         // The name takes what it needs up to three fifths; the bar the rest.
         let name = longest_name.clamp(NAME_MIN, (left * 3 / 5).max(NAME_MIN)).min(left.saturating_sub(BAR_MIN));
-        Cols { ops, lat, name, bar: left.saturating_sub(name).max(1) }
+        Cols { capacity: false, ops, lat, free: false, frag: false, name, bar: left.saturating_sub(name).max(1) }
+    }
+
+    /// The capacity view's columns: frag goes first as the box narrows,
+    /// then free; allocated, size and used always stay.
+    fn new_capacity(inner_w: usize, longest_name: usize) -> Cols {
+        let room = |free: bool, frag: bool| {
+            inner_w as isize
+                - 3
+                - (ALLOC_W + SIZE_W + USED_W + if free { FREE_W } else { 0 } + if frag { FRAG_W } else { 0 }) as isize
+        };
+        let fits = |free, frag, need: usize| room(free, frag) >= need as isize;
+        let (free, frag) = if fits(true, true, 30) {
+            (true, true)
+        } else if fits(true, false, 24) {
+            (true, false)
+        } else {
+            (false, false)
+        };
+        let left = room(free, frag).max(0) as usize;
+        let name = longest_name.clamp(NAME_MIN, (left * 3 / 5).max(NAME_MIN)).min(left.saturating_sub(BAR_MIN));
+        Cols { capacity: true, ops: false, lat: false, free, frag, name, bar: left.saturating_sub(name).max(1) }
+    }
+
+    /// The capacity view's figures for one row. A disk inside a mirror or
+    /// raidz has only a size: ZFS keeps no allocation for it.
+    fn space_figures(&self, sp: Option<&Space>, disk: bool) -> Vec<(String, Color)> {
+        let b = |x: Option<u64>| x.map(short_bytes).unwrap_or_else(|| "-".into());
+        let pct = |x: Option<u64>| x.map(|v| format!("{}%", v)).unwrap_or_else(|| "-".into());
+        let Some(sp) = sp else {
+            let mut out = vec![dim(format!("  {:>6}", "-"))];
+            if self.free {
+                out.push(dim(format!(" {:>6}", "-")));
+            }
+            out.push(dim(format!(" {:>6}", "-")));
+            if self.frag {
+                out.push(dim(format!("  {:>4}", "-")));
+            }
+            out.push(dim(format!("  {:>4}", "-")));
+            return out;
+        };
+        let shade = |x: Option<u64>| if x.is_some() { TEXT } else { DIM };
+        // A disk never has these figures, so its row stays blank but for the
+        // size rather than filling with dashes.
+        let b = |x: Option<u64>| if disk && x.is_none() { String::new() } else { b(x) };
+        let pct = |x: Option<u64>| if disk && x.is_none() { String::new() } else { pct(x) };
+        let mut out = vec![(format!("  {:>6}", b(sp.alloc)), shade(sp.alloc))];
+        if self.free {
+            out.push((format!(" {:>6}", b(sp.free)), shade(sp.free)));
+        }
+        out.push((format!(" {:>6}", short_bytes(sp.size)), if disk { DIM } else { TEXT }));
+        if self.frag {
+            let c = match sp.frag {
+                Some(f) if f >= 50 => AMBER,
+                Some(_) => TEXT,
+                None => DIM,
+            };
+            out.push((format!("  {:>4}", pct(sp.frag)), c));
+        }
+        let c = sp.cap.map(|c| value_colour(c as f64)).unwrap_or(DIM);
+        out.push((format!("  {:>4}", pct(sp.cap)), c));
+        out
     }
 
     fn figures(&self, v: &Vdev) -> Vec<(String, Color)> {
@@ -359,6 +447,18 @@ impl Cols {
     }
 
     fn legend(&self, ic: &Icons) -> Vec<(String, Color)> {
+        if self.capacity {
+            let mut s = format!("  {:>6}", "alloc");
+            if self.free {
+                s.push_str(&format!(" {:>6}", "free"));
+            }
+            s.push_str(&format!(" {:>6}", "size"));
+            if self.frag {
+                s.push_str(&format!("  {:>4}", "frag"));
+            }
+            s.push_str(&format!("  {:>4}", "used"));
+            return vec![(s, LABEL)];
+        }
         let mut out = vec![(format!("{:>5}", "busy"), LABEL)];
         if self.ops {
             out.push((format!("  {:>5} {:>5}", "r ops", "w ops"), LABEL));
@@ -418,13 +518,13 @@ pub fn draw(f: &mut Frame, v: &View) -> Hit {
         .map(|r| r.depth * 2 + 2 + display_name(r, v.full_names).chars().count())
         .max()
         .unwrap_or(NAME_MIN);
-    let cols = Cols::new(body.width.saturating_sub(2) as usize, longest);
+    let cols = Cols::new(body.width.saturating_sub(2) as usize, longest, v.capacity);
     let ic = icons(v.icons);
 
     // Legend, aligned with the figures inside the boxes.
     let legend_y = body.y;
     put_right(f.buffer_mut(), body.right().saturating_sub(2), legend_y, &cols.legend(&ic));
-    let label = format!("busy, last {}", window_label(v.window));
+    let label = if v.capacity { "space used".to_string() } else { format!("busy, last {}", window_label(v.window)) };
     let gx = body.x + 2 + cols.name as u16 + 1;
     put(f.buffer_mut(), gx, legend_y, cols.bar, &label, Style::default().fg(LABEL));
     let rest = Rect { y: body.y + 1, height: body.height - 1, ..body };
@@ -433,7 +533,9 @@ pub fn draw(f: &mut Frame, v: &View) -> Hit {
     let offset = v.offset.min(pools.len() - 1);
     let need: u16 = heights[offset..].iter().sum();
     let spare = rest.height.saturating_sub(need);
+    // The bandwidth graph belongs to the I/O view.
     let graph_h = match v.graph {
+        _ if v.capacity => 0,
         GraphMode::Off => 0,
         GraphMode::Auto if spare >= 7 && offset == 0 => spare.min(14),
         GraphMode::Auto => 0,
@@ -537,6 +639,9 @@ fn draw_header(f: &mut Frame, area: Rect, v: &View) {
         format!("  {}{} pool{}", shown, n, if n == 1 { "" } else { "s" }),
         Style::default().fg(if shown.is_empty() { DIM } else { AMBER }),
     ));
+    if v.capacity {
+        spans.push(Span::styled("  capacity", Style::default().fg(TITLE).add_modifier(Modifier::BOLD)));
+    }
     if !v.leaves {
         spans.push(Span::styled("  vdevs only", Style::default().fg(AMBER)));
     }
@@ -672,6 +777,21 @@ fn draw_pool(f: &mut Frame, area: Rect, p: &Pool, cols: &Cols, v: &View) {
             continue;
         }
         let bx = x0 + cols.name as u16 + 1;
+        if cols.capacity {
+            let sp = p.space(r);
+            match sp.as_ref().and_then(|s| s.cap) {
+                Some(c) => gauge(buf, bx, y, cols.bar, c as f64),
+                // A disk has no allocation of its own: its device name,
+                // for finding it in other tools, stands in for the gauge.
+                None => {
+                    if let Some(d) = &r.dev {
+                        put(buf, bx, y, cols.bar, d, Style::default().fg(DIM));
+                    }
+                }
+            }
+            put_right(buf, right, y, &cols.space_figures(sp.as_ref(), r.kind == Kind::Disk && sp.as_ref().is_some_and(|s| s.cap.is_none())));
+            continue;
+        }
         if !r.hist.ring.is_empty() {
             spark(buf, bx, y, &r.hist.columns(v.window, cols.bar));
         } else if r.dev.is_some() {
@@ -769,7 +889,7 @@ fn draw_graph(f: &mut Frame, area: Rect, v: &View) {
 
 // ─────────────────────────── help ───────────────────────────
 
-pub const HELP: [(&str, &str); 15] = [
+pub const HELP: [(&str, &str); 16] = [
     ("q  Esc", "quit (Esc first closes this)"),
     ("↑ ↓  PgUp PgDn", "scroll through the pools"),
     ("Home End", "first or last pool"),
@@ -779,9 +899,10 @@ pub const HELP: [(&str, &str); 15] = [
     ("n  b", "graph: next or previous pool"),
     ("a", "graph: follow the busiest pool"),
     ("p", "full device names or short ones"),
+    ("c", "capacity view or I/O view"),
     ("+  -", "slower or faster refresh"),
     ("w", "history: last 1, 10 or 60 minutes"),
-    ("W", "save pools and history window"),
+    ("W", "save pools, view and history window"),
     ("Space", "pause"),
     ("i", "icons or ASCII"),
     ("?", "this help"),
@@ -845,12 +966,35 @@ mod tests {
 
     #[test]
     fn columns_drop_from_the_right_as_width_shrinks() {
-        let wide = Cols::new(120, 30);
+        let wide = Cols::new(120, 30, false);
         assert!(wide.ops && wide.lat);
-        let mid = Cols::new(70, 30);
+        let mid = Cols::new(70, 30, false);
         assert!(mid.ops && !mid.lat);
-        let narrow = Cols::new(50, 30);
+        let narrow = Cols::new(50, 30, false);
         assert!(!narrow.ops && !narrow.lat);
         assert!(narrow.name >= NAME_MIN && narrow.bar >= 1);
+    }
+
+    #[test]
+    fn capacity_columns_drop_frag_then_free() {
+        let wide = Cols::new(88, 30, true);
+        assert!(wide.capacity && wide.free && wide.frag);
+        let mid = Cols::new(58, 30, true);
+        assert!(mid.free && !mid.frag);
+        let narrow = Cols::new(44, 30, true);
+        assert!(!narrow.free && !narrow.frag);
+        assert!(narrow.name >= NAME_MIN && narrow.bar >= 1);
+    }
+
+    #[test]
+    fn space_figures_fit_the_legend() {
+        let c = Cols::new(88, 30, true);
+        let width = |v: &[(String, Color)]| v.iter().map(|(s, _)| s.chars().count()).sum::<usize>();
+        let sp = Space { size: 8_000_000_000_000, alloc: Some(5_000_000_000_000), free: Some(3_000_000_000_000), frag: Some(30), cap: Some(62) };
+        let disk = Space { size: 4_000_000_000_000, ..Default::default() };
+        let legend = width(&c.legend(&icons(false)));
+        assert_eq!(width(&c.space_figures(Some(&sp), false)), legend);
+        assert_eq!(width(&c.space_figures(Some(&disk), true)), legend);
+        assert_eq!(width(&c.space_figures(None, false)), legend);
     }
 }

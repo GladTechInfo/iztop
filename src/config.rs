@@ -14,6 +14,8 @@ pub struct Config {
     pub pool_hidden: Vec<String>,
     /// Seconds of history the graphs span; None: the default.
     pub window: Option<usize>,
+    /// The capacity view (true) or the I/O view (false), if saved.
+    pub capacity: Option<bool>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -22,6 +24,16 @@ pub fn default_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("iztop").join("iztop.conf"))
+}
+
+/// `io` or `capacity`, as the config file and --view spell the view:
+/// `Some(true)` for the capacity view.
+pub fn parse_view(v: &str) -> Option<bool> {
+    match v {
+        "io" => Some(false),
+        "capacity" => Some(true),
+        _ => None,
+    }
 }
 
 fn parse_list(v: &str) -> Vec<String> {
@@ -47,6 +59,11 @@ impl Config {
             match k.trim() {
                 "pool_order" => c.pool_order = parse_list(v),
                 "pool_hidden" => c.pool_hidden = parse_list(v),
+                "view" if v.is_empty() => c.capacity = None,
+                "view" => match parse_view(v) {
+                    Some(cap) => c.capacity = Some(cap),
+                    None => errors.push(format!("line {}: view takes io or capacity", n + 1)),
+                },
                 "window" if v.is_empty() => c.window = None,
                 "window" => match crate::app::parse_window(v) {
                     Some(w) => c.window = Some(w),
@@ -80,10 +97,18 @@ pool_hidden = {}
 
 # History the graphs span: 1m, 10m or 60m; empty for the default.
 window = {}
+
+# View at start: io or capacity; empty for the default (io).
+view = {}
 ",
             self.pool_order.join(", "),
             self.pool_hidden.join(", "),
             self.window.map(crate::app::window_label).unwrap_or_default(),
+            match self.capacity {
+                Some(true) => "capacity",
+                Some(false) => "io",
+                None => "",
+            },
         )
     }
 
@@ -117,7 +142,12 @@ mod tests {
 
     #[test]
     fn rendered_config_parses_back() {
-        let c = Config { pool_order: vec!["fast".into(), "bulk".into()], pool_hidden: vec!["boot".into()], window: Some(600) };
+        let c = Config {
+            pool_order: vec!["fast".into(), "bulk".into()],
+            pool_hidden: vec!["boot".into()],
+            window: Some(600),
+            capacity: Some(true),
+        };
         let (back, errors) = Config::parse(&c.render());
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(back, c);

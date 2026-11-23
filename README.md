@@ -73,6 +73,7 @@ progress — and a bandwidth graph. Graphs span the last minute, ten minutes or 
 | **iostat figures** | Read and write operations, bandwidth and latency (total wait) per row, over the refresh interval. |
 | **Health and errors** | Pool health in the title; a vdev or disk that is not ONLINE, or has READ/WRITE/CKSUM errors, is shown in red on its row. |
 | **Capacity and fragmentation** | A capacity gauge, allocated and total size, and fragmentation in each title. |
+| **Capacity view** | Press `c`: allocated, free, size, fragmentation and space used for every pool and vdev, with a gauge per row; disks show their size and device name. |
 | **Scrub and resilver** | Progress, rate and time left while one runs; errors found afterwards. |
 | **Bandwidth graph** | Read and write for one pool over the same 1, 10 or 60 minutes; follows the busiest pool unless you choose one. |
 | **Pools menu** | Order pools, show or hide them, and save the choice. |
@@ -451,6 +452,7 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 
 | Key | Action | Explanation |
 |---|---|---|
+| `c` | Capacity or I/O view | Switches between the I/O figures and the capacity view. See [Capacity view](#capacity-view). The header shows `capacity` while it is on. |
 | `i` | Icons or ASCII | Nerd Font glyphs or plain ASCII markers. |
 
 ![iztop with ASCII markers](docs/images/iztop-ascii.png)
@@ -573,6 +575,28 @@ the **latency** columns are dropped first, then the **operations** columns.
 
 ![iztop at 90 columns](docs/images/iztop-narrow-pane.png)
 
+<a id="capacity-view"></a>
+### Capacity view
+
+Press `c` (or start with `--view capacity`) to replace the I/O figures with how full each pool and
+vdev is. The busy graph gives way to a space-used gauge, and the bandwidth graph is hidden. `c`
+again, or `W` to keep the view for next time.
+
+| Column | Meaning | Unit |
+|---|---|---|
+| gauge | Space used, on the same green-to-red scale as the title gauge. A disk row shows its device name (`sda`, `nvme0n1`) here instead. | |
+| **alloc** | Allocated space. | bytes (`K`, `M`, `G`, `T` binary) |
+| **free** | Free space. | bytes |
+| **size** | Size. On a disk row, the size of the partition ZFS uses. | bytes |
+| **frag** | Free-space fragmentation; amber from 50%. | % |
+| **used** | Allocated ÷ size, rounded down as `zpool list` rounds it. | % |
+
+The figures are `zpool list -v`'s, read every 5 seconds, so the pool row agrees with the title. Like
+the title, they are **raw**: parity included. ZFS keeps allocation, free space and fragmentation for
+a pool and its **top-level vdevs** (a mirror, a raidz group, a special or log mirror, a single-disk
+vdev) only. A disk inside a mirror or raidz has a size and nothing else, so its row shows just that.
+As the window narrows, **frag** is dropped first, then **free**.
+
 ### Measured and calculated values
 
 | Kind | Values |
@@ -594,6 +618,7 @@ the **latency** columns are dropped first, then the **operations** columns.
 | `-l`, `--vdevs-only` | Hide the disks inside mirrors and raidz vdevs. | disks shown |
 | `-g`, `--graph <MODE>` | Bandwidth graph: `auto` (when there is room), `on`, `off`. | `auto` |
 | `-w`, `--window <SPAN>` | History the graphs span: `1m`, `10m` or `60m`. | `1m`, or `window` in the configuration file |
+| `--view <VIEW>` | View at start: `io` or `capacity`. | `io`, or `view` in the configuration file |
 | `--full-names` | Full device names, not shortened ones. | short |
 | `--once` | Print one interval as plain text and exit. | |
 | `--no-icons` | ASCII markers instead of Nerd Font glyphs. | icons |
@@ -604,7 +629,7 @@ the **latency** columns are dropped first, then the **operations** columns.
 
 ### Configuration file
 
-iztop's configuration file holds only what the pools menu and `w` set, and is written only when you
+iztop's configuration file holds only what the pools menu, `w` and `c` set, and is written only when you
 press `W`, in the main view or the pools menu. It lives at `$XDG_CONFIG_HOME/iztop/iztop.conf`, normally
 `~/.config/iztop/iztop.conf` — for `sudo iztop`, root's home directory.
 
@@ -613,6 +638,7 @@ press `W`, in the main view or the pools menu. It lives at `$XDG_CONFIG_HOME/izt
 | `pool_order` | Pool names, comma-separated, shown first and in this order. Pools not listed follow alphabetically, so a newly imported pool still appears. |
 | `pool_hidden` | Pool names, comma-separated, never shown unless named on the command line. |
 | `window` | History the graphs span at start: `1m`, `10m` or `60m`. Empty for the default (`1m`). `-w` on the command line overrides it. |
+| `view` | View at start: `io` or `capacity`. Empty for the default (`io`). `--view` on the command line overrides it. |
 
 Example:
 
@@ -621,6 +647,7 @@ Example:
 pool_order = tank, fast
 pool_hidden = backup
 window = 10m
+view = io
 ```
 
 If a line is invalid, iztop reports it with its line number and applies the rest.
@@ -714,8 +741,9 @@ stable, documented interface, so iztop reads that:
   `-v` every vdev, `-l` latency, `-P` full device paths, `-y` skip the since-boot summary, `-T u` a
   Unix timestamp before each interval. ZFS flushes its output per pool rather than per interval, so
   iztop closes an interval on the next timestamp or after a 150 ms lull.
-- **status feed.** `zpool status -j` (OpenZFS 2.3 or later) and `zpool list`, every 5 seconds:
-  health, error counters, fragmentation, scrub and resilver. On older OpenZFS the JSON is skipped
+- **status feed.** `zpool status -j` (OpenZFS 2.3 or later) and `zpool list -v -P`, every 5 seconds:
+  health, error counters, fragmentation, scrub and resilver, and each vdev's space for the capacity
+  view. If `zpool list` refuses `-v -P`, iztop asks for the pools alone. On older OpenZFS the JSON is skipped
   and health comes from `zpool list` alone.
 
 Each feed runs on its own thread, so a slow or hung pool never stalls the screen.

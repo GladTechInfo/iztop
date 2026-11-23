@@ -254,6 +254,19 @@ impl Scan {
     }
 }
 
+/// Space on one vdev or disk, from `zpool list -v`. ZFS records allocated
+/// space only for a pool and its top-level vdevs; a disk inside a mirror or
+/// raidz has a size and nothing else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Space {
+    pub size: u64,
+    pub alloc: Option<u64>,
+    pub free: Option<u64>,
+    pub frag: Option<u64>,
+    /// Percentage used, truncated, as zpool list prints it.
+    pub cap: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PoolStatus {
     pub name: String,
@@ -262,6 +275,8 @@ pub struct PoolStatus {
     pub alloc: u64,
     pub frag: Option<u64>,
     pub scan: Option<Scan>,
+    /// Keyed as iostat prints the vdev, as `vdevs` is.
+    pub space: HashMap<String, Space>,
     /// Keyed as iostat prints the vdev: full path for a disk, name otherwise.
     pub vdevs: HashMap<String, VdevStatus>,
 }
@@ -269,14 +284,24 @@ pub struct PoolStatus {
 /// Reads `zpool list` and `zpool status -j`. The list is required; the JSON
 /// status (OpenZFS 2.3 and later) only adds to it.
 pub fn read_status() -> Result<Vec<PoolStatus>, String> {
-    let out = Command::new("zpool")
-        .args(["list", "-H", "-p", "-o", "name,size,alloc,frag,health"])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| format!("zpool: {}", e))?;
+    // -v adds a row per vdev and disk; -P names disks by full path, as the
+    // iostat stream does, so the two can be matched.
+    let list = |args: &[&str]| {
+        Command::new("zpool")
+            .args(args)
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| format!("zpool: {}", e))
+    };
+    let out = list(&["list", "-H", "-p", "-v", "-P", "-o", LIST_COLUMNS])?;
     let mut pools = parse_list(&String::from_utf8_lossy(&out.stdout));
+    if pools.is_empty() {
+        // An older zpool that refuses -v or -P with -o: pools alone.
+        let out = list(&["list", "-H", "-p", "-o", LIST_COLUMNS])?;
+        pools = parse_list(&String::from_utf8_lossy(&out.stdout));
+    }
     if let Ok(out) = Command::new("zpool")
         .args(["status", "-j", "-p", "--json-int"])
         .env("LC_ALL", "C")
@@ -291,23 +316,40 @@ pub fn read_status() -> Result<Vec<PoolStatus>, String> {
     Ok(pools)
 }
 
+const LIST_COLUMNS: &str = "name,size,alloc,free,frag,cap,health";
+
+/// Parses `zpool list -H -p [-v -P] -o name,size,alloc,free,frag,cap,health`.
+/// A pool's line starts with its name; each vdev and disk under it starts
+/// with a tab. Group headings (special, logs, cache) are printed with spaces,
+/// not tabs, and are skipped.
 pub fn parse_list(s: &str) -> Vec<PoolStatus> {
-    s.lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\t').collect();
-            if f.len() < 5 {
-                return None;
-            }
-            Some(PoolStatus {
+    // A figure, or None for "-". frag and cap carry a % without -p on some
+    // versions.
+    let n = |f: &str| f.trim_end_matches('%').parse::<u64>().ok();
+    let mut pools: Vec<PoolStatus> = Vec::new();
+    for l in s.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() == 7 && !f[0].is_empty() {
+            pools.push(PoolStatus {
                 name: f[0].to_string(),
-                size: f[1].parse().unwrap_or(0),
-                alloc: f[2].parse().unwrap_or(0),
-                frag: f[3].trim_end_matches('%').parse().ok(),
-                health: f[4].to_string(),
+                size: n(f[1]).unwrap_or(0),
+                alloc: n(f[2]).unwrap_or(0),
+                frag: n(f[4]),
+                health: f[6].to_string(),
                 ..Default::default()
-            })
-        })
-        .collect()
+            });
+        } else if f.len() == 8 && f[0].is_empty() {
+            // `if let ... else { continue }`: a vdev line before any pool
+            // line has nowhere to go.
+            let Some(p) = pools.last_mut() else { continue };
+            let Some(size) = n(f[2]) else { continue };
+            p.space.insert(
+                f[1].to_string(),
+                Space { size, alloc: n(f[3]), free: n(f[4]), frag: n(f[5]), cap: n(f[6]) },
+            );
+        }
+    }
+    pools
 }
 
 pub fn apply_status_json(pools: &mut [PoolStatus], j: &Json) {
@@ -423,7 +465,7 @@ special                                                    -      -  -  -  -  - 
 
     #[test]
     fn reads_list_and_status() {
-        let mut p = parse_list("tank\t1000\t600\t12\tDEGRADED\nfast\t10\t1\t-\tONLINE\n");
+        let mut p = parse_list("tank\t1000\t600\t400\t12\t60\tDEGRADED\nfast\t10\t1\t9\t-\t10\tONLINE\n");
         assert_eq!(p.len(), 2);
         assert_eq!(p[0].frag, Some(12));
         assert_eq!(p[1].frag, None);
@@ -443,5 +485,23 @@ special                                                    -      -  -  -  -  - 
         assert_eq!(p[0].vdevs["/dev/d1"].state, "FAULTED");
         assert_eq!(p[0].vdevs["/dev/d1"].errors(), 3);
         assert_eq!(p[0].vdevs["mirror-0"].state, "DEGRADED");
+    }
+
+    #[test]
+    fn reads_vdev_space_from_list_v() {
+        let text = "tank\t1200\t700\t500\t20\t58\tONLINE\n\
+                    \tmirror-0\t1000\t690\t310\t21\t69\tONLINE\n\
+                    \t/dev/disk/by-id/d1-part1\t1010\t-\t-\t-\t-\tONLINE\n\
+                    special                -     -     -     -     -  -\n\
+                    \tmirror-1\t200\t10\t190\t3\t5\tONLINE\n";
+        let p = parse_list(text);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].size, 1200);
+        assert_eq!(p[0].frag, Some(20));
+        let m = &p[0].space["mirror-0"];
+        assert_eq!((m.size, m.alloc, m.free, m.frag, m.cap), (1000, Some(690), Some(310), Some(21), Some(69)));
+        let d = &p[0].space["/dev/disk/by-id/d1-part1"];
+        assert_eq!((d.size, d.alloc, d.cap), (1010, None, None));
+        assert_eq!(p[0].space["mirror-1"].cap, Some(5));
     }
 }
