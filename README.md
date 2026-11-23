@@ -37,13 +37,14 @@ It is the storage companion to [igtop](https://github.com/GladTechInfo/igtop) (G
 
 [ZFS](https://openzfs.org/) is a filesystem and volume manager that groups disks into **pools**.
 Inside a pool, disks are arranged in **vdevs** (virtual devices) — mirrors, raidz groups or single
-disks. ZFS's own `zpool iostat -v` command prints how much each vdev and disk is reading and writing,
-but as a scrolling wall of numbers.
+disks. ZFS's own `zpool iostat -v` command prints how much each vdev and disk is reading and
+writing, but as a scrolling wall of numbers.
 
 iztop runs that command for you and draws its figures as a live, readable screen: one box per pool,
 one row per vdev and disk, with a graph of how busy each disk has been, coloured from green to red.
 It adds what `iostat` does not show — health, error counters, capacity, fragmentation and scrub
-progress — and a bandwidth graph. Graphs span the last minute, ten minutes or hour.
+progress — and a bandwidth graph. Graphs span the last minute, ten minutes or hour. Press `c` for a
+second view of how full each pool and vdev is.
 
 ### The problem it solves
 
@@ -53,6 +54,7 @@ progress — and a bandwidth graph. Graphs span the last minute, ten minutes or 
 | Is the pool healthy? | Health in the box title; any vdev or disk that is not ONLINE, or has errors, is named in red on its row. |
 | How long will the scrub take? | Scrub or resilver progress, rate and time left in the box title. |
 | How fast is it reading and writing, and how long does each I/O wait? | Operations, bandwidth and latency per row, exactly as `zpool iostat` measures them. |
+| Which vdev is filling up? | The capacity view (`c`): allocated, free, size, fragmentation and space used for every pool and top-level vdev. |
 | Will it fit beside my other panes? | Designed for a half-width terminal pane: columns drop away as the window narrows. |
 
 ### Who it is for
@@ -77,9 +79,9 @@ progress — and a bandwidth graph. Graphs span the last minute, ten minutes or 
 | **Scrub and resilver** | Progress, rate and time left while one runs; errors found afterwards. |
 | **Bandwidth graph** | Read and write for one pool over the same 1, 10 or 60 minutes; follows the busiest pool unless you choose one. |
 | **Pools menu** | Order pools, show or hide them, and save the choice. |
-| **Narrow-friendly** | Latency, then operations, are dropped as the terminal narrows; long disk names keep their serial number. |
+| **Narrow-friendly** | Latency, then operations, are dropped as the terminal narrows (in the capacity view, fragmentation, then free); long disk names keep their serial number. |
 | **Scripting** | `--once` prints one interval as a plain-text table. |
-| **Safe and small** | One static binary; written in Rust with `#![forbid(unsafe_code)]`; it only reads. |
+| **Safe and small** | One static binary; written in Rust with `#![forbid(unsafe_code)]`; it never changes a pool. |
 
 ---
 
@@ -142,7 +144,7 @@ above. To do each step by hand, or to build from source, see [Installation](#5-i
 |---|---|
 | **Operating system** | Linux on x86-64 (64-bit Intel or AMD processors). |
 | **OpenZFS** | The `zpool` command, from OpenZFS. **2.3 or later** for health, error counters and scrub detail (`zpool status -j`); on older versions iztop still runs, with health from `zpool list` alone. Check with `zpool version`. |
-| **Privileges** | Root, or a user allowed to run `zpool iostat` and `zpool status`. |
+| **Privileges** | Root, or a user allowed to run `zpool iostat`, `zpool status` and `zpool list`. |
 | **Font** | A [Nerd Font](https://www.nerdfonts.com/) in your terminal for the icons; otherwise use `--no-icons` or press `i`. |
 
 iztop does not install or configure ZFS. If `zpool list` does not work on your machine, set up ZFS
@@ -198,14 +200,15 @@ repositories: `apt install iztop` without a file name will not find them.
 **Step 1 — download the package and its checksums:**
 
 ```sh
-ver=$(curl -s https://api.github.com/repos/GladTechInfo/iztop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
+ver=$(curl -fsSL https://github.com/GladTechInfo/iztop/releases/latest/download/SHA256SUMS | sed -n 's/.*iztop-\(.*\)-x86_64-linux$/\1/p')
 base=https://github.com/GladTechInfo/iztop/releases/download/v$ver
 curl -LO "$base/SHA256SUMS"
 curl -LO "$base/iztop_${ver}-1_amd64.deb"        # Debian, Ubuntu, Proxmox VE
 curl -LO "$base/iztop-${ver}-1.x86_64.rpm"       # Fedora, RHEL, openSUSE
 ```
 
-To install a particular version instead of the latest, set it by hand, for example `ver=0.1.0`.
+The first line reads the latest version number from the release's own checksum file. To install a
+particular version instead, set it by hand, for example `ver=0.3.1`.
 
 **Step 2 — check the download.** This must print `OK` for the file you downloaded:
 
@@ -249,7 +252,7 @@ CachyOS and other Arch-based distributions use the same steps. If you use `rustu
 The static binary runs on any x86-64 Linux distribution, whatever its C library:
 
 ```sh
-ver=$(curl -s https://api.github.com/repos/GladTechInfo/iztop/releases/latest | sed -n 's/.*"tag_name": "v\(.*\)".*/\1/p')
+ver=$(curl -fsSL https://github.com/GladTechInfo/iztop/releases/latest/download/SHA256SUMS | sed -n 's/.*iztop-\(.*\)-x86_64-linux$/\1/p')
 base=https://github.com/GladTechInfo/iztop/releases/download/v$ver
 curl -LO "$base/SHA256SUMS"
 curl -LO "$base/iztop-${ver}-x86_64-linux"
@@ -341,8 +344,9 @@ static binary that runs on other machines, see [Static builds](#static-builds).
 | `makepkg` (Arch, CachyOS) | `sudo pacman -R iztop` |
 | Static binary or source build | `sudo rm /usr/local/bin/iztop`, and delete the cloned directory if you have one. |
 
-The only file iztop ever writes is its configuration, and only when you press `W`. To remove it too: `rm -r ~/.config/iztop` (as the user who saved it — `/root/.config` if
-you ran iztop with `sudo`).
+The only file iztop ever writes is its configuration, and only when you press `W`. To remove it
+too: `rm -r ~/.config/iztop` (as the user who saved it — `/root/.config` if you ran iztop with
+`sudo`).
 
 ---
 
@@ -368,6 +372,8 @@ default), because every figure is a rate over that interval. Press `?` for help 
 | `sudo iztop -g on` | Always draws the bandwidth graph, even if pools must scroll. |
 | `sudo iztop -g off` | Never draws the graph. |
 | `sudo iztop --full-names` | Full device names, as `zpool iostat -P` prints them. |
+| `sudo iztop -w 10m` | Graphs span the last 10 minutes rather than one. |
+| `sudo iztop --view capacity` | Starts in the capacity view: how full each pool and vdev is. |
 | `sudo iztop --once` | Prints one interval as plain text and exits. |
 
 ### Watching a scrub or resilver
@@ -394,7 +400,8 @@ shown.
 | No health, error or scrub figures | OpenZFS is older than 2.3, which lacks `zpool status -j`. Health still comes from `zpool list`. |
 | A disk's graph is an empty dotted track for its whole width | The vdev is a file, not a block device, so there is no busy figure for it. |
 | The left of every graph is blank | iztop has not been running for the whole window yet; history starts when iztop does. |
-| Columns are missing | The terminal is too narrow: latency is dropped first, then operations. Widen the window. |
+| Columns are missing | The terminal is too narrow: latency is dropped first, then operations (in the capacity view, fragmentation, then free). Widen the window. |
+| A disk row in the capacity view shows only a size | Expected: ZFS keeps allocated and free space for pools and top-level vdevs, not for each disk inside a mirror or raidz. |
 | Squares or question marks instead of icons | The terminal font lacks Nerd Font glyphs. Install a [Nerd Font](https://www.nerdfonts.com/) or use `--no-icons`. |
 | `Illegal instruction` from a binary you built | Your Rust standard library contains AVX-512; see [Static builds](#static-builds). |
 
@@ -442,7 +449,7 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 | `n`, `b` | Next or previous pool | Graphs the next or previous pool in display order; turns the graph on if it was off. |
 | `a` | Busiest pool | Returns the graph to following the busiest pool. |
 | `w` | History window | Cycles the span of every graph: the last *1 minute* (default) → *10 minutes* → *60 minutes*. |
-| `W` | Save | Saves the history window, with the pools menu's order and hidden pools, to the [configuration file](#configuration-file), so iztop starts with them next time. |
+| `W` | Save | Saves the history window and the view (I/O or capacity), with the pools menu's order and hidden pools, to the [configuration file](#configuration-file), so iztop starts with them next time. |
 
 ![The bandwidth graph after n](docs/images/iztop-graph-next-pool.png)
 
@@ -469,8 +476,8 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 | `↑` `↓`, `j` `k`, `Home` `End` | Select a pool. |
 | `Space`, `Enter` | Show or hide the selected pool (`[x]` shown, `[ ]` hidden). |
 | `Shift+↑` `Shift+↓`, `+` `-`, `K` `J` | Move the selected pool up or down. |
-| `r` | Default order (alphabetical), every pool shown. |
-| `W` | Save the order and hidden pools, and the history window, to the configuration file. |
+| `r` | Default order (as `zpool` lists the pools), every pool shown. |
+| `W` | Save the order and hidden pools, the history window and the view to the configuration file. |
 | `Esc`, `d`, `q` | Close the menu. |
 
 ---
@@ -481,26 +488,31 @@ Note that `+` and `-` work the opposite way round from igtop and istop, where `+
 
 | No. | Area | What it shows |
 |---|---|---|
-| 1 | **Header** | Host name, clock, refresh interval, number of pools, and messages after a key press. |
+| 1 | **Header** | Host name, clock, refresh interval, number of pools, the view and other states, and messages after a key press. |
 | 2 | **Column legend** | The names of the figure columns on the right of every row. |
 | 3 | **Bandwidth graph** | Read and write bandwidth for one pool over the history window. |
 | 4 | **Pool title** | Pool name, health, scrub or resilver progress, capacity and fragmentation. |
 | 5 | **Layout** | The pool, its vdevs and their disks, indented as in `zpool status`. |
 | 6 | **Busy history** | How busy each disk has been over the history window. |
-| 7 | **Figures** | Busy %, operations, bandwidth and latency. |
+| 7 | **Figures** | Busy %, operations, bandwidth and latency; in the [capacity view](#capacity-view), space. |
 
 ### Colours
 
 Gauges and graph columns are coloured along a ramp from green through amber to red, so a column's
-colour says how high it is. The dotted part of a graph is idle time; blank is time before iztop started. Latency is coloured on a
-logarithmic scale: 100 µs and below is green, about 10 ms (an ordinary hard-disk access) amber, and
-a second red. Anything unhealthy is red.
+colour says how high it is. The dotted part of a graph is idle time; blank is time before iztop
+started. Latency is coloured on a logarithmic scale: 100 µs and below is green, about 10 ms (an
+ordinary hard-disk access) amber, and a second red. Anything unhealthy is red.
 
 ### Header (1) and legend (2)
 
 The header shows `iztop`, the host name, the local time, the refresh interval and the number of
-pools shown. After a key press it shows a short confirmation such as `graph: on` or
-`refresh 2000 ms`.
+pools (`2 of 4 pools` in amber when some are hidden). Then come any states that change what you
+see: `capacity` in the capacity view, `vdevs only` after `l`, `paused` after `Space`, and a
+warning if `zpool iostat` has stopped. After a key press it shows a short confirmation such as
+`graph: on` or `refresh 2000 ms`.
+
+The legend on the next line names the columns of the view on screen, with the graph's label above
+the graphs (`busy, last 1m`, or `space used` in the capacity view).
 
 ### Bandwidth graph (3)
 
@@ -508,13 +520,13 @@ pools shown. After a key press it shows a short confirmation such as `graph: on`
 
 | Item | Meaning |
 |---|---|
-| Title | `bandwidth`, the pool graphed, the history window (`last 10m`), its position among the pools (`3/3`) and the keys `b` `n`. |
+| Title | `bandwidth`, the pool graphed, the history window (`last 1m`), its position among the pools (`2/4`) and the keys `b` `n`. |
 | `read` (top) | Read bandwidth now, the peak and the mean over the window; the read graph grows upwards. |
 | `write` (bottom) | The same for writes; the write graph hangs downwards. |
 
 Both halves share one scale, the highest rate in view, but never less than 1 MiB/s, so a pool at
 rest is not drawn as busy. In the default mode the graph appears only when every pool fits on screen
-with at least seven rows to spare, and is at most 14 rows high.
+with at least seven rows to spare, and is at most 14 rows high. The capacity view hides it.
 
 ### Pool title (4)
 
@@ -548,13 +560,14 @@ name gives way to them.
 
 ### Busy history (6)
 
-The graph shows, second by second, the share of time during which the disk had at least one I/O in flight, read from
-the kernel's block-layer accounting for the **whole disk** (for a partition, its parent disk). A
-mirror, raidz or pool row shows its **busiest** disk, because one saturated disk holds up the rest.
-The newest second is at the right. iztop keeps an hour; `w` chooses whether the graph spans the
-last 1, 10 or 60 minutes, and the legend above the graphs says which (`busy, last 1m`). When a
-column covers more than one second it shows the **busiest** of them, so a short burst is not lost in a
-long window. Busy near 100 % with low bandwidth usually means many small, slow operations.
+The graph shows, second by second, the share of time during which the disk had at least one I/O in
+flight, read from the kernel's block-layer accounting for the **whole disk** (for a partition, its
+parent disk). A mirror, raidz or pool row shows its **busiest** disk, because one saturated disk
+holds up the rest. The newest second is at the right. iztop keeps an hour; `w` chooses whether the
+graph spans the last 1, 10 or 60 minutes, and the legend above the graphs says which (`busy, last
+1m`). When a column covers more than one second it shows the **busiest** of them, so a short burst
+is not lost in a long window. Busy near 100 % with low bandwidth usually means many small, slow
+operations.
 
 ### Figures (7)
 
@@ -574,8 +587,8 @@ the **latency** columns are dropped first, then the **operations** columns.
 ### Capacity view
 
 Press `c` (or start with `--view capacity`) to replace the I/O figures with how full each pool and
-vdev is. The busy graph gives way to a space-used gauge, and the bandwidth graph is hidden. `c`
-again, or `W` to keep the view for next time.
+vdev is. The busy graph gives way to a space-used gauge, and the bandwidth graph is hidden. Press
+`c` again to return to the I/O view, or `W` to start in the capacity view next time.
 
 | Column | Meaning | Unit |
 |---|---|---|
@@ -628,13 +641,13 @@ As the window narrows, **frag** is dropped first, then **free**.
 
 ### Configuration file
 
-iztop's configuration file holds only what the pools menu, `w` and `c` set, and is written only when you
-press `W`, in the main view or the pools menu. It lives at `$XDG_CONFIG_HOME/iztop/iztop.conf`, normally
-`~/.config/iztop/iztop.conf` — for `sudo iztop`, root's home directory.
+iztop's configuration file holds only what the pools menu, `w` and `c` set, and is written only when
+you press `W`, in the main view or the pools menu. It lives at `$XDG_CONFIG_HOME/iztop/iztop.conf`,
+normally `~/.config/iztop/iztop.conf` — for `sudo iztop`, root's home directory.
 
 | Key | Meaning |
 |---|---|
-| `pool_order` | Pool names, comma-separated, shown first and in this order. Pools not listed follow alphabetically, so a newly imported pool still appears. |
+| `pool_order` | Pool names, comma-separated, shown first and in this order. Pools not listed follow in the order `zpool` lists them, so a newly imported pool still appears. |
 | `pool_hidden` | Pool names, comma-separated, never shown unless named on the command line. |
 | `window` | History the graphs span at start: `1m`, `10m` or `60m`. Empty for the default (`1m`). `-w` on the command line overrides it. |
 | `view` | View at start: `io` or `capacity`. Empty for the default (`io`). `--view` on the command line overrides it. |
@@ -653,9 +666,11 @@ If a line is invalid, iztop reports it with its line number and applies the rest
 
 ### Scripting with `--once`
 
-`--once` reads one interval of `zpool iostat` and `zpool status`, prints a table and exits. Each
-pool begins with a `#` line of pool-wide figures, followed by one row per vdev and disk. A real
-sample from the demonstration pools:
+`--once` reads `zpool iostat` for two intervals (busy is measured between them) along with
+`zpool status`, prints the second interval as a table and exits. Each pool begins with a `#` line
+of pool-wide figures, followed by one row per vdev and disk. The capacity view's per-vdev figures
+are not included; `zpool list -v -p` gives them in a script. A real sample from two small
+demonstration pools on loop devices:
 
 ```text
 name                                        state      dev  busy%    r_ops    w_ops      r_bytes_s      w_bytes_s    r_wait_ns    w_wait_ns    errors
@@ -698,7 +713,7 @@ sudo iztop --once | awk 'NR>1 && $1!~/^#/ && ($2!="ONLINE" || $NF!="0/0/0")'
 
 ### Architecture
 
-iztop is a single Rust binary of about 3,300 lines in nine modules, with
+iztop is a single Rust binary of about 3,500 lines in nine modules, with
 `#![forbid(unsafe_code)]`:
 
 | Module | Responsibility |
@@ -708,7 +723,7 @@ iztop is a single Rust binary of about 3,300 lines in nine modules, with
 | `json.rs` | A small JSON reader for `zpool status -j` (no serialisation framework). |
 | `disks.rs` | Busy figures from `/proc/diskstats`. |
 | `app.rs` | Joins the iostat stream, the status feed and the busy figures; keeps an hour of history per row and per pool. |
-| `config.rs` | The pools-menu configuration file. |
+| `config.rs` | The configuration file: pool order, hidden pools, history window and view. |
 | `clock.rs` | Local time from `/etc/localtime` (TZif), without a date library. |
 | `ui.rs` | Rendering with ratatui; gauges and graphs are written cell by cell. |
 | `theme.rs` | Colour ramp and glyphs, shared with igtop and istop. |
@@ -717,7 +732,7 @@ iztop is a single Rust binary of about 3,300 lines in nine modules, with
 flowchart LR
     subgraph Children["zpool child processes"]
         IO["zpool iostat -p -v -l -P -y -T u &lt;interval&gt;<br/>(long-lived)"]
-        ST["zpool status -j<br/>zpool list<br/>(every 5 s)"]
+        ST["zpool status -j<br/>zpool list -v -P<br/>(every 5 s)"]
     end
     DS["/proc/diskstats"]
     IO -->|thread 1| zp[zpool.rs]
@@ -742,8 +757,9 @@ stable, documented interface, so iztop reads that:
   iztop closes an interval on the next timestamp or after a 150 ms lull.
 - **status feed.** `zpool status -j` (OpenZFS 2.3 or later) and `zpool list -v -P`, every 5 seconds:
   health, error counters, fragmentation, scrub and resilver, and each vdev's space for the capacity
-  view. If `zpool list` refuses `-v -P`, iztop asks for the pools alone. On older OpenZFS the JSON is skipped
-  and health comes from `zpool list` alone.
+  view. If `zpool list` refuses `-v -P`, iztop asks for the pools alone, and the capacity view falls
+  back on `zpool iostat`'s allocated and free space for each vdev. On OpenZFS older than 2.3 the JSON
+  is skipped and health comes from `zpool list` alone.
 
 Each feed runs on its own thread, so a slow or hung pool never stalls the screen.
 
@@ -775,7 +791,7 @@ key is pressed. Figures and `--once` are the interval's own.
 |---|---|---|
 | [ratatui](https://ratatui.rs/) | 0.29.0 | Terminal user interface. |
 | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28.1 | Terminal input and output. |
-| [rustix](https://github.com/bytecodealliance/rustix) | 0.38 | Process system calls without `unsafe` code in iztop. |
+| [rustix](https://github.com/bytecodealliance/rustix) | 0.38.44 | Process system calls without `unsafe` code in iztop. |
 
 At run time iztop needs only the `zpool` command.
 
@@ -786,7 +802,11 @@ At run time iztop needs only the `zpool` command.
 - File vdevs have no busy figure.
 - The name column is narrow in a small window, so long state words are truncated (`OFFLI` for
   `OFFLINE`).
-- Health and scrub progress refresh every 5 seconds, whatever the refresh interval.
+- Health, scrub progress and the capacity view refresh every 5 seconds, whatever the refresh
+  interval.
+- ZFS keeps no allocated or free space for a disk inside a mirror or raidz, so the capacity view
+  shows only such a disk's size.
+- `--once` prints the I/O figures only, not the capacity view.
 
 ---
 
@@ -828,9 +848,9 @@ IZTOP_BUILD_STD=1 ./build.sh
 
 ### Testing with demonstration pools
 
-You can try iztop without touching real pools by building small pools on loop devices, as the
-screenshots were made. **This creates real pools; run it only on a test machine, and destroy them
-afterwards.** The commands are for `bash`, which splits `$L` into separate device names.
+You can try iztop without touching real pools by building small pools on loop devices. **This
+creates real pools; run it only on a test machine, and destroy them afterwards.** The commands are
+for `bash`, which splits `$L` into separate device names.
 
 ```sh
 mkdir -p ~/zdemo && for i in 0 1 2; do truncate -s 2G ~/zdemo/d$i.img; done
