@@ -449,7 +449,11 @@ fn handle_key(k: KeyEvent, ui: &mut Ui, app: &mut app::App, paused: &mut bool, h
         KeyCode::Char('p') => ui.full_names = !ui.full_names,
         KeyCode::Char('c') => {
             ui.capacity = !ui.capacity;
-            ui.say(if ui.capacity { "capacity view" } else { "I/O view" }, false);
+            // The header's `capacity` marker already says so; only the way
+            // back needs a word.
+            if !ui.capacity {
+                ui.say("I/O view", false);
+            }
         }
         KeyCode::Char('g') => {
             ui.graph = match ui.graph {
