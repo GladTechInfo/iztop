@@ -85,23 +85,27 @@ progress — and a bandwidth graph. Graphs span the last minute, ten minutes or 
 
 ## 3. Screenshots
 
-All screenshots are genuine captures of iztop. To keep them free of private data, iztop ran with
-the host name `demo` against three small **demonstration pools** built on loop devices — `tank` (a
-three-disk raidz1), `fast` (a two-way mirror) and `backup` (a single disk) — with demonstration
-reads, writes and a scrub running. Disk names therefore appear as `loop0`…`loop5`; on real hardware
-they are the disks' model and serial numbers. Nothing has been edited.
+All screenshots are genuine captures of iztop on a Proxmox VE host with four pools, under a minute
+of test reads and writes on every pool. To keep the host private, its name, pool names and disk
+serial numbers were replaced character for character after capture (the host appears as `nas01`);
+every figure, colour and layout is as iztop drew it.
 
-**Three pools with each area numbered** — explained in
+**Live** — 30 seconds of the busy and bandwidth graphs, played at twice real speed.
+
+![iztop: 30 seconds under load](docs/images/iztop-live.gif)
+
+**Four pools with each area numbered** — explained in
 [Understanding the Interface](#8-understanding-the-interface).
 
 ![iztop: annotated interface](docs/images/iztop-interface-annotated.png)
 
-**A degraded pool** — one disk of `tank` was taken offline: the title and rows turn red, and the
-offline disk's graph is empty.
+**The capacity view** — `c` switches between the I/O figures and how full each pool and vdev is.
 
-![iztop: degraded pool](docs/images/iztop-degraded.png)
+![iztop: switching between the I/O and capacity views](docs/images/iztop-capacity-toggle.gif)
 
-**A half-width pane (90 columns)** — the same pools, with the bandwidth graph above them.
+![iztop: capacity view](docs/images/iztop-capacity.png)
+
+**A half-width pane (90 columns)** — the latency columns stay, the names shorten.
 
 ![iztop in a narrow terminal](docs/images/iztop-narrow-pane.png)
 
@@ -518,7 +522,7 @@ with at least seven rows to spare, and is at most 14 rows high.
 
 ### Pool title (4)
 
-![Pool box during a scrub](docs/images/iztop-pool-box.png)
+![A pool box under load](docs/images/iztop-pool-box.png)
 
 | Item | Meaning |
 |---|---|
@@ -526,7 +530,7 @@ with at least seven rows to spare, and is at most 14 rows high.
 | Health | `ONLINE`, or in red `DEGRADED`, `FAULTED`, `SUSPENDED` and so on. |
 | Scrub or resilver | While one runs: its percentage, current rate and estimated time left (or `paused`). After one has finished with errors: `scrub N errors` in red. |
 | Capacity gauge and `%` | Allocated space as a share of the pool's size, rounded down as `zpool list` rounds it. |
-| `8.80G / 11.5G` | Allocated and total size. Both are **raw**: parity included, as `zpool list` counts them, so a raidz pool's figures are larger than the usable space `zfs list` reports. |
+| `75.5T / 124T` | Allocated and total size. Both are **raw**: parity included, as `zpool list` counts them, so a raidz pool's figures are larger than the usable space `zfs list` reports. |
 | `frag` | Free-space fragmentation, as `zpool list` reports it. |
 
 ### Rows (5)
@@ -536,7 +540,7 @@ with at least seven rows to spare, and is at most 14 rows high.
 | Pool | `tank` | The whole pool. |
 | Vdev | `raidz1-0`, `mirror-0` | A redundancy group of disks. |
 | Group | `special`, `logs`, `cache`, `spares`, `dedup` | A section of auxiliary devices; it has no figures of its own. |
-| Disk | `loop0`, or a model and serial | One device. |
+| Disk | `ST16000NM001G-2KK103_WY7FFVC8` | One device: its model and serial number. |
 
 Disk names are shortened: the `ata-`, `nvme-`, `scsi-`, `usb-` or `sas-` prefix and any `-partN`
 suffix are removed, and if the name is still too long, the start of the model is kept with the
@@ -545,11 +549,6 @@ whole serial number (`WDC_WD80…ABC123`). `p` shows full names.
 When a vdev or disk is **not ONLINE**, or has read, write or checksum errors, the state and the
 error counters (`READ/WRITE/CKSUM`, e.g. `0/0/3`) are written in red at the end of its name, and the
 name gives way to them.
-
-![Degraded pool](docs/images/iztop-degraded.png)
-
-*One disk offline: the pool and its raidz vdev read DEGRADED and the disk OFFLINE, truncated to fit
-the name column.*
 
 ### Busy history (6)
 
@@ -596,6 +595,10 @@ the title, they are **raw**: parity included. ZFS keeps allocation, free space a
 a pool and its **top-level vdevs** (a mirror, a raidz group, a special or log mirror, a single-disk
 vdev) only. A disk inside a mirror or raidz has a size and nothing else, so its row shows just that.
 As the window narrows, **frag** is dropped first, then **free**.
+
+![The capacity view in a 90-column pane](docs/images/iztop-capacity-narrow.png)
+
+*At 90 columns every column still fits; the disk names shorten to keep their serial numbers.*
 
 ### Measured and calculated values
 
