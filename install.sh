@@ -112,13 +112,25 @@ if [ -z "$METHOD" ]; then
 fi
 
 # ------------------------------------------------------------- the release ---
-if [ -z "$VERSION" ]; then
-  tmp_json=$(mktemp)
-  fetch "https://api.github.com/repos/$REPO/releases/latest" "$tmp_json" ||
-    { rm -f "$tmp_json"; die 'cannot ask GitHub for the latest release (offline, or rate-limited? try --version)'; }
-  VERSION=$(sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' "$tmp_json" | head -n 1)
-  rm -f "$tmp_json"
-  [ -n "$VERSION" ] || die 'no release found on GitHub'
+# SHA256SUMS first: from releases/latest/download it also names the latest
+# version (a plain redirect, so no GitHub API and no API rate limit).
+# A world-readable directory, so apt's unprivileged downloader can read the .deb.
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT INT TERM
+chmod 755 "$dir"
+if [ -n "$VERSION" ]; then
+  base="https://github.com/$REPO/releases/download/v$VERSION"
+  fetch "$base/SHA256SUMS" "$dir/SHA256SUMS" || die "no release v$VERSION (or no SHA256SUMS in it)"
+else
+  fetch "https://github.com/$REPO/releases/latest/download/SHA256SUMS" "$dir/SHA256SUMS" ||
+    die 'cannot download the latest release from GitHub (offline?)'
+  # The static binary's line, "<sum>  NAME-X.Y.Z-x86_64-linux", gives X.Y.Z.
+  while read -r _sum f; do
+    f=${f#\*}
+    case $f in "$NAME"-*-x86_64-linux) VERSION=${f#"$NAME"-}; VERSION=${VERSION%-x86_64-linux} ;; esac
+  done < "$dir/SHA256SUMS"
+  [ -n "$VERSION" ] || die 'cannot tell the latest version from its SHA256SUMS'
+  base="https://github.com/$REPO/releases/download/v$VERSION"
 fi
 
 case $METHOD in
@@ -136,17 +148,17 @@ fi
 say "installing $NAME $VERSION from $FILE"
 
 # ---------------------------------------------------- download and verify ---
-# A world-readable directory, so apt's unprivileged downloader can read the .deb.
-dir=$(mktemp -d)
-trap 'rm -rf "$dir"' EXIT INT TERM
-chmod 755 "$dir"
-base="https://github.com/$REPO/releases/download/v$VERSION"
-fetch "$base/SHA256SUMS" "$dir/SHA256SUMS" || die "no release v$VERSION (or no SHA256SUMS in it)"
-fetch "$base/$FILE"      "$dir/$FILE"      || die "cannot download $base/$FILE"
+# Plain shell rather than awk: openSUSE's container images have no awk.
+fetch "$base/$FILE" "$dir/$FILE" || die "cannot download $base/$FILE"
 chmod 644 "$dir/$FILE"
 
-want=$(awk -v f="$FILE" '$2 == f || $2 == "*" f { print $1 }' "$dir/SHA256SUMS")
-got=$(sha256sum "$dir/$FILE" | awk '{ print $1 }')
+want=''
+while read -r sum f; do
+  [ "${f#\*}" = "$FILE" ] && want=$sum
+done < "$dir/SHA256SUMS"
+# shellcheck disable=SC2046  # split "<sum>  <file>" into $1 and $2
+set -- $(sha256sum "$dir/$FILE")
+got=$1
 [ -n "$want" ] || die "$FILE is not listed in SHA256SUMS"
 [ "$want" = "$got" ] || die "checksum mismatch for $FILE (expected $want, got $got) - not installed"
 say 'checksum OK'
