@@ -40,6 +40,9 @@ const LULL: Duration = Duration::from_millis(150);
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub ring: VecDeque<f64>,
+    /// Seconds pushed since the start, so a column can be pinned to the
+    /// seconds it holds rather than to their age.
+    total: u64,
     acc: f64,
     acc_t: f64,
 }
@@ -54,6 +57,7 @@ impl History {
                 self.ring.pop_front();
             }
             self.ring.push_back(mean);
+            self.total += 1;
             self.acc_t -= 1.0;
             self.acc = mean * self.acc_t;
         }
@@ -66,15 +70,31 @@ impl History {
     /// The last `window` seconds as `n` columns, newest at the right. Each is
     /// the highest second it covers, so a short burst survives a long window;
     /// a column older than the history is `None`.
+    ///
+    /// Column edges are fixed to the seconds themselves (second `s` since the
+    /// start belongs to column `s * n / window`), not to their age. Measured
+    /// back from the newest second instead, the edges would slide along the
+    /// data each second; with a column of, say, 4.9 seconds and ZFS writing
+    /// every 5, a column would now and then catch no write, and that empty
+    /// column would race across the graph. Pinned edges scroll with the data.
+    /// The newest column fills up as its seconds arrive.
     pub fn columns(&self, window: usize, n: usize) -> Vec<Option<f64>> {
-        let len = self.ring.len();
-        let per = window as f64 / n.max(1) as f64;
+        let (w, n) = (window.max(1) as i64, n as i64);
+        let total = self.total as i64;
+        // Seconds still in the ring: `first` up to, not including, `total`.
+        let first = total - self.ring.len() as i64;
+        // Column k starts at second floor(k * w / n); the newest second, total - 1,
+        // lies in the last k whose start is not after it.
+        let start = |k: i64| (k * w).div_euclid(n.max(1));
+        let newest = if total == 0 { -1 } else { (total * n + w - 1).div_euclid(w) - 1 };
         (0..n)
             .map(|c| {
-                // Ages in seconds covered by column c, 0 the newest.
-                let lo = ((n - 1 - c) as f64 * per).floor() as usize;
-                let hi = (((n - c) as f64 * per).floor() as usize).max(lo + 1).min(len);
-                (lo..hi).map(|a| self.ring[len - 1 - a]).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
+                let k = newest - (n - 1 - c);
+                // A column narrower than a second still shows the second it is in.
+                let (lo, hi) = (start(k), start(k + 1).max(start(k) + 1));
+                (lo.max(first)..hi.min(total))
+                    .map(|s| self.ring[(s - first) as usize])
+                    .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
             })
             .collect()
     }
@@ -418,9 +438,30 @@ mod tests {
         }
         // Six seconds over three columns of two: the higher of each pair.
         assert_eq!(h.columns(6, 3), [Some(2.0), Some(9.0), Some(6.0)]);
-        // A window longer than the history: older columns are empty.
-        assert_eq!(h.columns(12, 3), [None, Some(2.0), Some(9.0)]);
+        // A window longer than the history: older columns are empty, and the
+        // newest holds only the seconds it has so far.
+        assert_eq!(h.columns(12, 3), [None, Some(9.0), Some(6.0)]);
         // More columns than seconds: each second is stretched.
         assert_eq!(h.columns(2, 4), [Some(5.0), Some(5.0), Some(6.0), Some(6.0)]);
+    }
+
+    #[test]
+    fn columns_scroll_with_the_data() {
+        // A write every 5 seconds over 4.9-second columns. Each second the
+        // finished columns may only move left, whole and unchanged; with
+        // edges measured back from the newest second they changed in place,
+        // and an empty column raced to the right.
+        let mut h = History::default();
+        let mut prev: Option<Vec<Option<f64>>> = None;
+        for s in 0..800 {
+            h.add(if s % 5 == 0 { 100.0 } else { 0.0 }, 1.0);
+            let cols = h.columns(600, 122);
+            if let Some(p) = prev.filter(|_| s >= 700) {
+                // Shift 0 or 1: the newest column (index 121) may still change.
+                let same = |d: usize| p[d..121] == cols[..121 - d];
+                assert!(same(0) || same(1), "second {}: columns changed in place", s);
+            }
+            prev = Some(cols);
+        }
     }
 }
