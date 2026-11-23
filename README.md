@@ -12,7 +12,7 @@ disk is, pool health and error counters, capacity, fragmentation, and scrub or r
 It is the storage companion to [igtop](https://github.com/GladTechInfo/igtop) (GPUs) and
 [istop](https://github.com/GladTechInfo/istop) (the whole system), and shares their look.
 
-![iztop showing three ZFS pools, one of them being scrubbed](docs/images/iztop-interface-annotated.png)
+![iztop monitoring four ZFS pools under load, 30 seconds at twice real speed](docs/images/iztop-live.gif)
 
 ## Contents
 
@@ -89,10 +89,6 @@ All screenshots are genuine captures of iztop on a Proxmox VE host with four poo
 of test reads and writes on every pool. To keep the host private, its name, pool names and disk
 serial numbers were replaced character for character after capture (the host appears as `nas01`);
 every figure, colour and layout is as iztop drew it.
-
-**Live** — 30 seconds of the busy and bandwidth graphs, played at twice real speed.
-
-![iztop: 30 seconds under load](docs/images/iztop-live.gif)
 
 **Four pools with each area numbered** — explained in
 [Understanding the Interface](#8-understanding-the-interface).
