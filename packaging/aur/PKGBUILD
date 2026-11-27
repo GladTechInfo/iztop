@@ -5,7 +5,7 @@
 # each release. Not yet on the AUR: until then, build it here with makepkg.
 
 pkgname=iztop
-pkgver=0.3.2
+pkgver=0.3.3
 pkgrel=1
 pkgdesc='Terminal ZFS pool I/O monitor: per-vdev operations, bandwidth, latency, disk busy, health and scrub progress'
 arch=('x86_64')
@@ -17,7 +17,7 @@ optdepends=('zfs-utils: the zpool command iztop reads its figures from')
 # The release profile strips the binary, so a -debug package would be empty.
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('fb340e65a37505e21483ca35044ac68c3b0cd0b77ce1e70509c54bf7ffaf566d')
+sha256sums=('3fd166ddf825a5baae0af6b20715dc20492111c39592d767fbf24d0b695e48da')
 
 prepare() {
   cd "$pkgname-$pkgver"
