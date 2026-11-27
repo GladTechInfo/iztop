@@ -645,6 +645,9 @@ fn draw_header(f: &mut Frame, area: Rect, v: &View) {
     if let Some(e) = a.error.as_ref().filter(|_| !a.pools.is_empty()) {
         spans.push(Span::styled(format!("  {} {}", ic.warn, e), Style::default().fg(WARN)));
     }
+    if let Some(age) = a.stale_health_age() {
+        spans.push(Span::styled(format!("  health {age}s old"), Style::default().fg(WARN)));
+    }
     if let Some(e) = a.status_error.as_ref().or(a.status_warning.as_ref()) {
         spans.push(Span::styled(format!("  {} {}", ic.warn, e), Style::default().fg(WARN)));
     }
@@ -752,11 +755,11 @@ fn draw_pool(f: &mut Frame, area: Rect, p: &Pool, cols: &Cols, v: &View) {
             if !ok_state(&s.state) {
                 warn.push_str(&s.state);
             }
-            if s.errors() > 0 {
+            if !s.all_clear() {
                 if !warn.is_empty() {
                     warn.push(' ');
                 }
-                warn.push_str(&format!("{}/{}/{}", s.read_errors, s.write_errors, s.checksum_errors));
+                warn.push_str(&s.error_counts());
             }
         }
         let warn_w = if warn.is_empty() { 0 } else { (warn.chars().count() + 1).min(name_room) };

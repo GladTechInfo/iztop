@@ -4,7 +4,6 @@
 use crate::disks;
 use crate::zpool::{self, Feed, IoRow, IoStream, PoolStatus, Space, VdevStatus};
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 /// History columns, one per second of sampled time: an hour, whatever the
@@ -222,13 +221,15 @@ pub struct App {
     /// Rows of the interval now arriving.
     pending: Vec<IoRow>,
     pending_at: Instant,
-    status_rx: Receiver<Result<zpool::StatusReport, String>>,
+    status_feed: zpool::StatusFeed,
+    last_status: Option<Instant>,
     statuses: Option<Vec<PoolStatus>>,
     /// Why there is nothing to show, when there is nothing to show.
     pub error: Option<String>,
     pub blocks: u64,
     prev_busy: HashMap<String, u64>,
     prev_busy_t: Option<Instant>,
+    last_device_refresh: Option<Instant>,
     pub status_error: Option<String>,
     pub status_warning: Option<String>,
     // A script needs a timestamp boundary to prove an interval is complete.
@@ -250,12 +251,14 @@ impl App {
             spawned: Instant::now(),
             pending: Vec::new(),
             pending_at: Instant::now(),
-            status_rx: zpool::status_feed(STATUS_EVERY),
+            status_feed: zpool::status_feed(STATUS_EVERY),
+            last_status: None,
             statuses: None,
             error: None,
             blocks: 0,
             prev_busy: HashMap::new(),
             prev_busy_t: None,
+            last_device_refresh: None,
             status_error: None,
             status_warning: None,
             once,
@@ -342,9 +345,10 @@ impl App {
         if !self.once && self.stream.is_none() && self.spawned.elapsed() >= RESPAWN_AFTER {
             self.spawn();
         }
-        while let Ok(r) = self.status_rx.try_recv() {
+        while let Ok(r) = self.status_feed.rx.try_recv() {
             match r {
                 Ok(report) => {
+                    self.last_status = Some(report.sampled_at);
                     self.status_error = None;
                     self.status_warning = report.warning;
                     self.apply_status(report.pools);
@@ -354,6 +358,11 @@ impl App {
             changed = true;
         }
         changed
+    }
+
+    pub fn stale_health_age(&self) -> Option<u64> {
+        self.last_status.map(|t| t.elapsed().as_secs())
+            .filter(|age| *age >= 10 || self.status_error.is_some())
     }
 
     fn apply_status(&mut self, st: Vec<PoolStatus>) {
@@ -372,6 +381,10 @@ impl App {
         self.error = None;
         self.blocks += 1;
         let now = Instant::now();
+        let refresh_devices = self.last_device_refresh.is_none_or(|t| now.duration_since(t) >= STATUS_EVERY);
+        if refresh_devices {
+            self.last_device_refresh = Some(now);
+        }
         let busy_ms = disks::read_busy_ms();
         let dt = self.prev_busy_t.map(|t| now.duration_since(t).as_secs_f64());
         let interval = self.interval_ms as f64 / 1000.0;
@@ -417,6 +430,10 @@ impl App {
             let pool = &mut self.pools[idx];
             let n = sec.len();
             let mut out: Vec<Vdev> = Vec::with_capacity(n);
+            // Keep history with its device when ZFS inserts or reorders rows.
+            let mut previous: HashMap<_, _> = pool.rows.iter_mut().map(|v| {
+                ((v.key.as_str(), v.depth), (v.kind, v.dev.take(), std::mem::take(&mut v.hist)))
+            }).collect();
             for (i, io) in sec.iter().enumerate() {
                 let leaf = sec.get(i + 1).is_none_or(|next| next.depth <= io.depth);
                 let kind = if i == 0 {
@@ -428,10 +445,13 @@ impl App {
                 } else {
                     Kind::Vdev
                 };
-                let dev = if kind == Kind::Disk {
-                    disks::whole_disk(&io.name)
-                } else {
-                    None
+                let prior = previous.remove(&(io.name.as_str(), io.depth));
+                let (dev, hist) = match prior {
+                    Some((Kind::Disk, dev, hist)) if kind == Kind::Disk && !refresh_devices => (dev, hist),
+                    other => {
+                        let dev = if kind == Kind::Disk { disks::whole_disk(&io.name) } else { None };
+                        (dev, other.map(|(_, _, hist)| hist).unwrap_or_default())
+                    }
                 };
                 let busy = match (&dev, dt) {
                     (Some(d), Some(dt)) => match (self.prev_busy.get(d), busy_ms.get(d)) {
@@ -440,12 +460,6 @@ impl App {
                     },
                     _ => None,
                 };
-                let hist = pool
-                    .rows
-                    .iter_mut()
-                    .find(|v| v.key == io.name && v.depth == io.depth)
-                    .map(|v| std::mem::take(&mut v.hist))
-                    .unwrap_or_default();
                 out.push(Vdev { key: io.name.clone(), depth: io.depth, kind, io: io.clone(), dev, busy, hist });
             }
             // Anything with members shows its busiest disk: one saturated

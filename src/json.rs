@@ -2,14 +2,13 @@
 //!
 //! One command's output, read a few times a minute, does not justify a
 //! serialisation framework. This parses the whole of RFC 8259 into a tree and
-//! offers lookups; numbers are kept as f64, which is exact for every byte
-//! count and time ZFS reports (GUIDs lose precision, and are not used).
+//! offers lookups; number tokens retain their original precision.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json {
     Null,
     Bool(bool),
-    Num(f64),
+    Num(String),
     Str(String),
     Arr(Vec<Json>),
     /// Members in document order: vdevs are listed in pool order.
@@ -40,16 +39,11 @@ impl Json {
 
     /// A number, or a string holding one: without `--json-int`, zpool writes
     /// numbers as strings.
-    pub fn num(&self) -> Option<f64> {
+    pub fn u64(&self) -> Option<u64> {
         match self {
-            Json::Num(n) => Some(*n),
-            Json::Str(s) => s.trim().parse().ok(),
+            Json::Num(s) | Json::Str(s) => s.trim().parse().ok(),
             _ => None,
         }
-    }
-
-    pub fn u64(&self) -> Option<u64> {
-        self.num().filter(|n| *n >= 0.0).map(|n| n as u64)
     }
 }
 
@@ -169,7 +163,7 @@ impl Parser<'_> {
         }
         let s = std::str::from_utf8(&self.b[start..self.i]).unwrap_or("");
         match s.parse::<f64>() {
-            Ok(n) if !s.is_empty() => Ok(Json::Num(n)),
+            Ok(_) if !s.is_empty() => Ok(Json::Num(s.to_string())),
             _ => {
                 self.i = start;
                 self.err("invalid number")
@@ -241,7 +235,7 @@ mod tests {
     #[test]
     fn parses_nested_documents() {
         let j = parse(r#"{"a": [1, 2.5, -3e2], "b": {"c": "x\"yé"}, "d": null, "e": true}"#).unwrap();
-        assert_eq!(j.get("a"), Some(&Json::Arr(vec![Json::Num(1.0), Json::Num(2.5), Json::Num(-300.0)])));
+        assert_eq!(j.get("a"), Some(&Json::Arr(vec![Json::Num("1".into()), Json::Num("2.5".into()), Json::Num("-3e2".into())])));
         assert_eq!(j.get("b").and_then(|b| b.get("c")).and_then(|c| c.str()), Some("x\"yé"));
         assert_eq!(j.get("d"), Some(&Json::Null));
         assert_eq!(j.get("e"), Some(&Json::Bool(true)));
@@ -251,6 +245,16 @@ mod tests {
     fn numbers_in_strings_still_read() {
         let j = parse(r#"{"n": "1529008357376"}"#).unwrap();
         assert_eq!(j.get("n").and_then(Json::u64), Some(1_529_008_357_376));
+    }
+
+    #[test]
+    fn integer_counters_are_exact() {
+        for text in ["18446744073709551615", r#""18446744073709551615""#] {
+            assert_eq!(parse(text).unwrap().u64(), Some(u64::MAX));
+        }
+        for text in ["18446744073709551616", "-1", "0.5"] {
+            assert_eq!(parse(text).unwrap().u64(), None);
+        }
     }
 
     #[test]

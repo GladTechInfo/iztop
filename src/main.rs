@@ -260,7 +260,7 @@ fn once(args: &Args, cfg: &Config) -> i32 {
                 f0(r.io.wbw),
                 f0(r.io.rwait),
                 f0(r.io.wwait),
-                na(st.map(|s| format!("{}/{}/{}", s.read_errors, s.write_errors, s.checksum_errors))),
+                na(st.map(zpool::VdevStatus::error_counts)),
             );
         }
     }
@@ -333,6 +333,7 @@ fn run_tui(
     let zone = clock::Zone::local();
     let mut paused = false;
     let mut last_clock = String::new();
+    let mut last_health_age = None;
     let mut dirty = true;
     let mut hit = ui::Hit::default();
 
@@ -344,6 +345,11 @@ fn run_tui(
         if ui.status.as_ref().is_some_and(|(_, _, t)| now.duration_since(*t) > Duration::from_secs(5)) {
             ui.status = None;
             dirty = true;
+        }
+        let health_age = app.stale_health_age();
+        if health_age != last_health_age {
+            dirty = true;
+            last_health_age = health_age;
         }
         let clock = args.clock.then(|| zone.now_hms());
         if clock.as_deref().is_some_and(|c| c != last_clock) {

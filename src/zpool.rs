@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// One line of `zpool iostat -v`: a pool, a group heading (special, logs,
 /// cache, spares, dedup), a vdev or a disk.
@@ -200,14 +202,19 @@ fn read_blocks<R: std::io::Read>(mut r: BufReader<R>, tx: &Sender<Feed>, last_er
 #[derive(Clone, Debug, Default)]
 pub struct VdevStatus {
     pub state: String,
-    pub read_errors: u64,
-    pub write_errors: u64,
-    pub checksum_errors: u64,
+    pub read_errors: Option<u64>,
+    pub write_errors: Option<u64>,
+    pub checksum_errors: Option<u64>,
 }
 
 impl VdevStatus {
-    pub fn errors(&self) -> u64 {
-        self.read_errors + self.write_errors + self.checksum_errors
+    pub fn all_clear(&self) -> bool {
+        [self.read_errors, self.write_errors, self.checksum_errors] == [Some(0); 3]
+    }
+
+    pub fn error_counts(&self) -> String {
+        [self.read_errors, self.write_errors, self.checksum_errors]
+            .map(|v| v.map_or_else(|| "-".into(), |n| n.to_string())).join("/")
     }
 }
 
@@ -284,38 +291,93 @@ pub struct PoolStatus {
 /// Reads `zpool list` and `zpool status -j`. The list is required; the JSON
 /// status (OpenZFS 2.3 and later) only adds to it.
 pub struct StatusReport {
+    pub sampled_at: Instant,
     pub pools: Vec<PoolStatus>,
     pub warning: Option<String>,
 }
 
-fn output(args: &[&str]) -> Result<String, String> {
-    let cmd = format!("zpool {}", args[0]);
-    let out = Command::new("zpool").args(args).env("LC_ALL", "C").stdin(Stdio::null())
-        .output().map_err(|e| format!("cannot run {cmd}: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("{cmd}: {} ({})", stderr.lines().next().unwrap_or("command failed"), out.status));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn read_pipe(mut pipe: impl std::io::Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-pub fn read_status() -> Result<StatusReport, String> {
+fn output(args: &[&str], stop: &AtomicBool) -> Result<String, String> {
+    use std::os::unix::process::CommandExt;
+    let cmd = format!("zpool {}", args[0]);
+    if stop.load(Ordering::Relaxed) {
+        return Err(format!("{cmd}: stopped"));
+    }
+    let mut child = Command::new("zpool").args(args).env("LC_ALL", "C").process_group(0)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e| format!("cannot run {cmd}: {e}"))?;
+    let deadline = Instant::now() + STATUS_TIMEOUT;
+    std::thread::scope(|scope| {
+        // Drain both pipes during the wait. Large pool trees can fill a pipe.
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let out = scope.spawn(move || read_pipe(stdout));
+        let err = scope.spawn(move || read_pipe(stderr));
+        let status = loop {
+            // Keep the child unreaped until its pipes close. A helper may still
+            // hold a pipe after the command exits and must share its deadline.
+            let waited = if out.is_finished() && err.is_finished() { child.try_wait() } else { Ok(None) };
+            let failure = match waited {
+                Ok(Some(status)) => break status,
+                Ok(None) if stop.load(Ordering::Relaxed) => "stopped".to_string(),
+                Ok(None) if Instant::now() >= deadline => "timed out after 5s".to_string(),
+                Ok(None) => {
+                    std::thread::park_timeout(Duration::from_millis(25));
+                    continue;
+                }
+                Err(e) => e.to_string(),
+            };
+            if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::Kill);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{cmd}: {failure}"));
+        };
+        let collect = |thread: std::thread::ScopedJoinHandle<'_, std::io::Result<String>>| {
+            thread.join().map_err(|_| format!("{cmd}: pipe reader failed"))?
+                .map_err(|e| format!("{cmd}: {e}"))
+        };
+        let stdout = collect(out)?;
+        let stderr = collect(err)?;
+        if !status.success() {
+            return Err(format!("{cmd}: {} ({status})", stderr.lines().next().unwrap_or("command failed")));
+        }
+        Ok(stdout)
+    })
+}
+
+fn unsupported_option(e: &str) -> bool {
+    ["invalid option", "unrecognized option", "unknown option", "illegal option"]
+        .iter().any(|msg| e.to_ascii_lowercase().contains(msg))
+}
+
+fn read_status(stop: &AtomicBool) -> Result<StatusReport, String> {
+    let sampled_at = Instant::now();
     let mut warnings = Vec::new();
-    let mut pools = match output(&["list", "-H", "-p", "-v", "-P", "-o", LIST_COLUMNS]) {
-        Ok(s) => parse_list(&s),
-        Err(e) => {
+    let mut pools = match output(&["list", "-H", "-p", "-v", "-P", "-o", LIST_COLUMNS], stop) {
+        Ok(s) => parse_list(&s)?,
+        Err(e) if unsupported_option(&e) => {
             warnings.push(e);
             Vec::new()
         }
+        Err(e) => return Err(e),
     };
     if pools.is_empty() {
-        let list = output(&["list", "-H", "-p", "-o", LIST_COLUMNS])?;
-        pools = parse_list(&list);
+        let list = output(&["list", "-H", "-p", "-o", LIST_COLUMNS], stop)?;
+        pools = parse_list(&list)?;
         if !list.trim().is_empty() && pools.is_empty() {
             return Err("zpool list: unrecognised pool summary".into());
         }
     }
-    match output(&["status", "-j", "-p", "--json-int"]) {
+    match output(&["status", "-j", "-p", "--json-int"], stop) {
         Ok(s) => {
             let j = json::parse(&s).map_err(|e| format!("zpool status: invalid JSON: {e}"))?;
             if pools.iter().any(|p| j.get("pools").and_then(|all| all.get(&p.name)).is_none()) {
@@ -323,12 +385,11 @@ pub fn read_status() -> Result<StatusReport, String> {
             }
             apply_status_json(&mut pools, &j);
         }
-        Err(e) if ["invalid option", "unrecognized option", "unknown option", "illegal option"]
-            .iter().any(|msg| e.to_ascii_lowercase().contains(msg)) => warnings.push(e),
+        Err(e) if unsupported_option(&e) => warnings.push(e),
         Err(e) => return Err(e),
     }
     let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
-    Ok(StatusReport { pools, warning })
+    Ok(StatusReport { sampled_at, pools, warning })
 }
 
 const LIST_COLUMNS: &str = "name,size,alloc,free,frag,cap,health";
@@ -337,18 +398,25 @@ const LIST_COLUMNS: &str = "name,size,alloc,free,frag,cap,health";
 /// A pool's line starts with its name; each vdev and disk under it starts
 /// with a tab. Group headings (special, logs, cache) are printed with spaces,
 /// not tabs, and are skipped.
-pub fn parse_list(s: &str) -> Vec<PoolStatus> {
+pub fn parse_list(s: &str) -> Result<Vec<PoolStatus>, String> {
     // A figure, or None for "-". frag and cap carry a % without -p on some
     // versions.
     let n = |f: &str| f.trim_end_matches('%').parse::<u64>().ok();
     let mut pools: Vec<PoolStatus> = Vec::new();
     for l in s.lines() {
         let f: Vec<&str> = l.split('\t').collect();
-        if f.len() == 7 && !f[0].is_empty() {
+        if !f[0].is_empty() && f.len() > 1 {
+            let field = |i: usize, key: &str| f.get(i).and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| format!("zpool list: {}: invalid or missing {key}", f[0]));
+            let size = field(1, "size")?;
+            let alloc = field(2, "alloc")?;
+            if f.len() != 7 || f[6].is_empty() || f[6] == "-" {
+                return Err(format!("zpool list: {}: incomplete pool summary or missing health", f[0]));
+            }
             pools.push(PoolStatus {
                 name: f[0].to_string(),
-                size: n(f[1]).unwrap_or(0),
-                alloc: n(f[2]).unwrap_or(0),
+                size,
+                alloc,
                 frag: n(f[4]),
                 health: f[6].to_string(),
                 ..Default::default()
@@ -364,7 +432,7 @@ pub fn parse_list(s: &str) -> Vec<PoolStatus> {
             );
         }
     }
-    pools
+    Ok(pools)
 }
 
 pub fn apply_status_json(pools: &mut [PoolStatus], j: &Json) {
@@ -399,7 +467,7 @@ fn walk_vdevs(j: &Json, out: &mut HashMap<String, VdevStatus>, depth: usize) {
         return;
     }
     if j.get("vdev_type").is_some() {
-        let n = |k: &str| j.get(k).and_then(Json::u64).unwrap_or(0);
+        let n = |k: &str| j.get(k).and_then(Json::u64);
         let key = j.get("path").or_else(|| j.get("name")).and_then(Json::str).unwrap_or("").to_string();
         out.insert(
             key,
@@ -418,16 +486,41 @@ fn walk_vdevs(j: &Json, out: &mut HashMap<String, VdevStatus>, depth: usize) {
     }
 }
 
-/// Re-reads the status every `every` until the receiver goes away.
-pub fn status_feed(every: Duration) -> Receiver<Result<StatusReport, String>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || loop {
-        if tx.send(read_status()).is_err() {
-            return;
+pub struct StatusFeed {
+    pub rx: Receiver<Result<StatusReport, String>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for StatusFeed {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
         }
-        std::thread::sleep(every);
+    }
+}
+
+pub fn status_feed(every: Duration) -> StatusFeed {
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        while !cancelled.load(Ordering::Relaxed) {
+            if tx.send(read_status(&cancelled)).is_err() || cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            // Joining the pipe readers can leave an unpark token. Always
+            // measure the delay against the clock, including after a wake.
+            let next = Instant::now() + every;
+            while !cancelled.load(Ordering::Relaxed) {
+                let Some(left) = next.checked_duration_since(Instant::now()) else { break };
+                std::thread::park_timeout(left);
+            }
+        }
     });
-    rx
+    StatusFeed { rx, stop, thread: Some(thread) }
 }
 
 #[cfg(test)]
@@ -480,7 +573,7 @@ special                                                    -      -  -  -  -  - 
 
     #[test]
     fn reads_list_and_status() {
-        let mut p = parse_list("tank\t1000\t600\t400\t12\t60\tDEGRADED\nfast\t10\t1\t9\t-\t10\tONLINE\n");
+        let mut p = parse_list("tank\t1000\t600\t400\t12\t60\tDEGRADED\nfast\t10\t1\t9\t-\t10\tONLINE\n").unwrap();
         assert_eq!(p.len(), 2);
         assert_eq!(p[0].frag, Some(12));
         assert_eq!(p[1].frag, None);
@@ -498,7 +591,7 @@ special                                                    -      -  -  -  -  - 
         assert_eq!(s.pct(), 25.0);
         assert_eq!(s.eta_s(110), Some(30.0));
         assert_eq!(p[0].vdevs["/dev/d1"].state, "FAULTED");
-        assert_eq!(p[0].vdevs["/dev/d1"].errors(), 3);
+        assert_eq!(p[0].vdevs["/dev/d1"].error_counts(), "3/-/-");
         assert_eq!(p[0].vdevs["mirror-0"].state, "DEGRADED");
     }
 
@@ -509,7 +602,7 @@ special                                                    -      -  -  -  -  - 
                     \t/dev/disk/by-id/d1-part1\t1010\t-\t-\t-\t-\tONLINE\n\
                     special                -     -     -     -     -  -\n\
                     \tmirror-1\t200\t10\t190\t3\t5\tONLINE\n";
-        let p = parse_list(text);
+        let p = parse_list(text).unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].size, 1200);
         assert_eq!(p[0].frag, Some(20));

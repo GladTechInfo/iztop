@@ -139,9 +139,20 @@ case $METHOD in
   bin) FILE="${NAME}-${VERSION}-x86_64-linux" ;;
 esac
 
-# Already this version? (The static binary prints "NAME X.Y.Z" for --version.)
-if have "$NAME" && "$NAME" --version 2>/dev/null | grep -q " $VERSION\$"; then
-  say "$NAME $VERSION is already installed ($(command -v "$NAME"))"
+# Verify the selected installation, including its executable.
+case $METHOD in
+  bin) dest=$BINDIR/$NAME ;;
+  deb|rpm) dest=/usr/bin/$NAME ;;
+esac
+installed_version() {
+  case $METHOD in
+    deb) [ "$(dpkg-query -W -f='${Status} ${Version}' "$NAME" 2>/dev/null)" = "install ok installed $VERSION-1" ] || return 1 ;;
+    rpm) [ "$(rpm -q --qf '%{VERSION}' "$NAME" 2>/dev/null)" = "$VERSION" ] || return 1 ;;
+  esac
+  [ -x "$dest" ] && [ "$("$dest" --version)" = "$NAME $VERSION" ]
+}
+if installed_version; then
+  say "$NAME $VERSION is already installed ($dest)"
   exit 0
 fi
 
@@ -188,6 +199,7 @@ case $METHOD in
     case ":$PATH:" in *":$BINDIR:"*) ;; *) say "$BINDIR is not on your PATH" ;; esac ;;
 esac
 
-say "done: $("$NAME" --version 2>/dev/null || echo "$NAME $VERSION")"
+installed_version || die "could not verify $NAME $VERSION at $dest"
+say "installed $NAME $VERSION at $dest"
 say "start it with:  $RUN_HINT"
 say "remove it with: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --uninstall"

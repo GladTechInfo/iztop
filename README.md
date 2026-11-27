@@ -550,13 +550,15 @@ with at least seven rows to spare, and is at most 14 rows high. The capacity vie
 | Group | `special`, `logs`, `cache`, `spares`, `dedup` | A section of auxiliary devices; it has no figures of its own. |
 | Disk | `ST16000NM001G-2KK103_WY7FFVC8` | One device: its model and serial number. |
 
+New device paths are resolved on first sight. Existing paths are checked again on the first sample after five seconds, including paths that were previously unavailable.
+
 Disk names are shortened: the `ata-`, `nvme-`, `scsi-`, `usb-` or `sas-` prefix and any `-partN`
 suffix are removed, and if the name is still too long, the start of the model is kept with the
 whole serial number (`WDC_WD80…ABC123`). `p` shows full names.
 
 When a vdev or disk is **not ONLINE**, or has read, write or checksum errors, the state and the
 error counters (`READ/WRITE/CKSUM`, e.g. `0/0/3`) are written in red at the end of its name, and the
-name gives way to them.
+name gives way to them. A dash marks an unavailable counter. For example, `3/-/0` means three read errors, an unknown write-error count and zero checksum errors.
 
 ### Busy history (6)
 
@@ -670,7 +672,7 @@ If a line is invalid, iztop reports it with its line number and applies the rest
 `zpool status`, prints the second interval as a table and exits. Each pool begins with a `#` line
 of pool-wide figures, followed by one row per vdev and disk. Add `--vdevs-only` to hide
 member disks. The next timestamp confirms the end of the second interval. An incomplete
-sample or collector failure exits with status 1 and a diagnostic on standard error. Older
+sample, invalid pool size or allocation, or collector failure exits with status 1 and a diagnostic on standard error. Each status or list command has five seconds to finish. In the terminal, the header shows the age of the last successful health reading after an error or when it reaches ten seconds. Older
 OpenZFS versions that lack JSON status can still print pool summaries and I/O, with a warning
 that detailed status is unavailable. The capacity view's per-vdev figures
 are not included; `zpool list -v -p` gives them in a script. A real sample from two small
@@ -699,7 +701,7 @@ tank                                       ONLINE        -   43.8    44447      
 | `r_ops`, `w_ops` | Operations per second. |
 | `r_bytes_s`, `w_bytes_s` | Bytes per second. |
 | `r_wait_ns`, `w_wait_ns` | Total wait per operation, in nanoseconds; `-` with no operations. |
-| `errors` | `READ/WRITE/CKSUM` error counters. |
+| `errors` | `READ/WRITE/CKSUM` counters. Each missing counter is shown as `-`. |
 
 Examples:
 
