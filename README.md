@@ -668,7 +668,11 @@ If a line is invalid, iztop reports it with its line number and applies the rest
 
 `--once` reads `zpool iostat` for two intervals (busy is measured between them) along with
 `zpool status`, prints the second interval as a table and exits. Each pool begins with a `#` line
-of pool-wide figures, followed by one row per vdev and disk. The capacity view's per-vdev figures
+of pool-wide figures, followed by one row per vdev and disk. Add `--vdevs-only` to hide
+member disks. The next timestamp confirms the end of the second interval. An incomplete
+sample or collector failure exits with status 1 and a diagnostic on standard error. Older
+OpenZFS versions that lack JSON status can still print pool summaries and I/O, with a warning
+that detailed status is unavailable. The capacity view's per-vdev figures
 are not included; `zpool list -v -p` gives them in a script. A real sample from two small
 demonstration pools on loop devices:
 

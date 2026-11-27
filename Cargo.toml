@@ -1,6 +1,6 @@
 [package]
 name = "iztop"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Terminal ZFS pool I/O monitor: per-vdev operations, bandwidth, latency and disk busy"

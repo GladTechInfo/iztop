@@ -283,37 +283,52 @@ pub struct PoolStatus {
 
 /// Reads `zpool list` and `zpool status -j`. The list is required; the JSON
 /// status (OpenZFS 2.3 and later) only adds to it.
-pub fn read_status() -> Result<Vec<PoolStatus>, String> {
-    // -v adds a row per vdev and disk; -P names disks by full path, as the
-    // iostat stream does, so the two can be matched.
-    let list = |args: &[&str]| {
-        Command::new("zpool")
-            .args(args)
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|e| format!("zpool: {}", e))
-    };
-    let out = list(&["list", "-H", "-p", "-v", "-P", "-o", LIST_COLUMNS])?;
-    let mut pools = parse_list(&String::from_utf8_lossy(&out.stdout));
-    if pools.is_empty() {
-        // An older zpool that refuses -v or -P with -o: pools alone.
-        let out = list(&["list", "-H", "-p", "-o", LIST_COLUMNS])?;
-        pools = parse_list(&String::from_utf8_lossy(&out.stdout));
+pub struct StatusReport {
+    pub pools: Vec<PoolStatus>,
+    pub warning: Option<String>,
+}
+
+fn output(args: &[&str]) -> Result<String, String> {
+    let cmd = format!("zpool {}", args[0]);
+    let out = Command::new("zpool").args(args).env("LC_ALL", "C").stdin(Stdio::null())
+        .output().map_err(|e| format!("cannot run {cmd}: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("{cmd}: {} ({})", stderr.lines().next().unwrap_or("command failed"), out.status));
     }
-    if let Ok(out) = Command::new("zpool")
-        .args(["status", "-j", "-p", "--json-int"])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    {
-        if let Ok(j) = json::parse(&String::from_utf8_lossy(&out.stdout)) {
-            apply_status_json(&mut pools, &j);
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+pub fn read_status() -> Result<StatusReport, String> {
+    let mut warnings = Vec::new();
+    let mut pools = match output(&["list", "-H", "-p", "-v", "-P", "-o", LIST_COLUMNS]) {
+        Ok(s) => parse_list(&s),
+        Err(e) => {
+            warnings.push(e);
+            Vec::new()
+        }
+    };
+    if pools.is_empty() {
+        let list = output(&["list", "-H", "-p", "-o", LIST_COLUMNS])?;
+        pools = parse_list(&list);
+        if !list.trim().is_empty() && pools.is_empty() {
+            return Err("zpool list: unrecognised pool summary".into());
         }
     }
-    Ok(pools)
+    match output(&["status", "-j", "-p", "--json-int"]) {
+        Ok(s) => {
+            let j = json::parse(&s).map_err(|e| format!("zpool status: invalid JSON: {e}"))?;
+            if pools.iter().any(|p| j.get("pools").and_then(|all| all.get(&p.name)).is_none()) {
+                return Err("zpool status: missing pool in JSON output".into());
+            }
+            apply_status_json(&mut pools, &j);
+        }
+        Err(e) if ["invalid option", "unrecognized option", "unknown option", "illegal option"]
+            .iter().any(|msg| e.to_ascii_lowercase().contains(msg)) => warnings.push(e),
+        Err(e) => return Err(e),
+    }
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    Ok(StatusReport { pools, warning })
 }
 
 const LIST_COLUMNS: &str = "name,size,alloc,free,frag,cap,health";
@@ -404,7 +419,7 @@ fn walk_vdevs(j: &Json, out: &mut HashMap<String, VdevStatus>, depth: usize) {
 }
 
 /// Re-reads the status every `every` until the receiver goes away.
-pub fn status_feed(every: Duration) -> Receiver<Result<Vec<PoolStatus>, String>> {
+pub fn status_feed(every: Duration) -> Receiver<Result<StatusReport, String>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || loop {
         if tx.send(read_status()).is_err() {

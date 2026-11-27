@@ -48,19 +48,21 @@ pub struct History {
 }
 
 impl History {
-    pub fn add(&mut self, value: f64, dt: f64) {
-        self.acc += value * dt;
-        self.acc_t += dt;
-        while self.acc_t >= 1.0 {
-            let mean = self.acc / self.acc_t;
+    pub fn add(&mut self, value: f64, mut dt: f64) {
+        while dt >= 1.0 - self.acc_t {
+            let remaining = 1.0 - self.acc_t;
+            let mean = self.acc + value * remaining;
             if self.ring.len() == HISTORY {
                 self.ring.pop_front();
             }
             self.ring.push_back(mean);
             self.total += 1;
-            self.acc_t -= 1.0;
-            self.acc = mean * self.acc_t;
+            dt -= remaining;
+            self.acc_t = 0.0;
+            self.acc = 0.0;
         }
+        self.acc += value * dt;
+        self.acc_t += dt;
     }
 
     pub fn last(&self, n: usize) -> impl Iterator<Item = f64> + '_ {
@@ -157,6 +159,10 @@ pub struct Pool {
 }
 
 impl Pool {
+    pub fn visible_rows(&self, leaves: bool) -> impl Iterator<Item = &Vdev> {
+        self.rows.iter().filter(move |v| leaves || v.kind != Kind::Disk || v.depth < 2)
+    }
+
     pub fn vdev_status(&self, key: &str) -> Option<&VdevStatus> {
         self.status.as_ref().and_then(|s| s.vdevs.get(key))
     }
@@ -216,14 +222,17 @@ pub struct App {
     /// Rows of the interval now arriving.
     pending: Vec<IoRow>,
     pending_at: Instant,
-    status_rx: Receiver<Result<Vec<PoolStatus>, String>>,
+    status_rx: Receiver<Result<zpool::StatusReport, String>>,
     statuses: Option<Vec<PoolStatus>>,
     /// Why there is nothing to show, when there is nothing to show.
     pub error: Option<String>,
     pub blocks: u64,
     prev_busy: HashMap<String, u64>,
     prev_busy_t: Option<Instant>,
-    devs: HashMap<String, Option<String>>,
+    pub status_error: Option<String>,
+    pub status_warning: Option<String>,
+    // A script needs a timestamp boundary to prove an interval is complete.
+    once: bool,
 }
 
 pub fn hostname() -> String {
@@ -231,7 +240,7 @@ pub fn hostname() -> String {
 }
 
 impl App {
-    pub fn new(interval_ms: u64, only: Vec<String>) -> Self {
+    pub fn new(interval_ms: u64, only: Vec<String>, once: bool) -> Self {
         let mut a = App {
             host: hostname(),
             pools: Vec::new(),
@@ -247,10 +256,21 @@ impl App {
             blocks: 0,
             prev_busy: HashMap::new(),
             prev_busy_t: None,
-            devs: HashMap::new(),
+            status_error: None,
+            status_warning: None,
+            once,
         };
         a.spawn();
         a
+    }
+
+    pub fn sample_ready(&self) -> bool {
+        self.blocks >= 2 && !self.pools.is_empty() && self.pools.iter().all(|p| p.status.is_some())
+            && if self.only.is_empty() {
+                self.statuses.as_ref().is_some_and(|s| s.len() == self.pools.len())
+            } else {
+                self.only.iter().all(|n| self.pools.iter().any(|p| &p.name == n))
+            }
     }
 
     fn spawn(&mut self) {
@@ -306,7 +326,7 @@ impl App {
         }
         // An interval's rows come in a burst; a lull ends it without waiting
         // a whole interval for the next timestamp.
-        if !self.pending.is_empty() && (ended.is_some() || self.pending_at.elapsed() >= LULL) {
+        if !self.once && !self.pending.is_empty() && (ended.is_some() || self.pending_at.elapsed() >= LULL) {
             done.push(std::mem::take(&mut self.pending));
         }
         // Should more than one interval have queued up, only the newest counts.
@@ -316,23 +336,28 @@ impl App {
         }
         if let Some(e) = ended {
             self.stream = None;
-            self.error = Some(if e.is_empty() { "zpool iostat ended".into() } else { e });
+            self.error = Some(if e.is_empty() { "zpool iostat ended".into() } else { format!("zpool iostat: {e}") });
             changed = true;
         }
-        if self.stream.is_none() && self.spawned.elapsed() >= RESPAWN_AFTER {
+        if !self.once && self.stream.is_none() && self.spawned.elapsed() >= RESPAWN_AFTER {
             self.spawn();
         }
         while let Ok(r) = self.status_rx.try_recv() {
-            if let Ok(st) = r {
-                self.apply_status(st);
-                changed = true;
+            match r {
+                Ok(report) => {
+                    self.status_error = None;
+                    self.status_warning = report.warning;
+                    self.apply_status(report.pools);
+                }
+                Err(e) => self.status_error = Some(e),
             }
+            changed = true;
         }
         changed
     }
 
     fn apply_status(&mut self, st: Vec<PoolStatus>) {
-        if !st.is_empty() || self.pools.is_empty() {
+        if !self.once && (!st.is_empty() || self.pools.is_empty()) {
             // A pool exported since the last block goes; one imported is
             // picked up by iostat itself.
             self.pools.retain(|p| st.iter().any(|s| s.name == p.name));
@@ -363,6 +388,15 @@ impl App {
             }
         }
 
+        if self.once {
+            // A pool that first appears in the second interval has no baseline.
+            if self.pools.len() != sections.len()
+                || sections.iter().any(|sec| !self.pools.iter().any(|p| p.name == sec[0].name))
+            {
+                self.blocks = 1;
+                self.pools.clear();
+            }
+        }
         for sec in sections {
             let name = sec[0].name.clone();
             let idx = match self.pools.iter().position(|p| p.name == name) {
@@ -395,7 +429,7 @@ impl App {
                     Kind::Vdev
                 };
                 let dev = if kind == Kind::Disk {
-                    self.devs.entry(io.name.clone()).or_insert_with(|| disks::whole_disk(&io.name)).clone()
+                    disks::whole_disk(&io.name)
                 } else {
                     None
                 };
@@ -478,6 +512,14 @@ mod tests {
         assert_eq!(h.columns(12, 3), [None, Some(9.0), Some(6.0)]);
         // More columns than seconds: each second is stretched.
         assert_eq!(h.columns(2, 4), [Some(5.0), Some(5.0), Some(6.0), Some(6.0)]);
+    }
+
+    #[test]
+    fn history_splits_samples_at_second_boundaries() {
+        let mut h = History::default();
+        h.add(0.0, 0.75);
+        h.add(100.0, 1.25);
+        assert_eq!(h.last(2).collect::<Vec<_>>(), [25.0, 100.0]);
     }
 
     #[test]

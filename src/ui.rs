@@ -476,12 +476,6 @@ impl Cols {
     }
 }
 
-/// Rows of a pool that are drawn: with leaves hidden, disks inside a mirror
-/// or raidz go, but a disk that is itself a top-level vdev stays.
-fn visible(p: &Pool, leaves: bool) -> impl Iterator<Item = &Vdev> {
-    p.rows.iter().filter(move |v| leaves || v.kind != Kind::Disk || v.depth < 2)
-}
-
 fn display_name(v: &Vdev, full: bool) -> String {
     v.short_name(full)
 }
@@ -514,7 +508,7 @@ pub fn draw(f: &mut Frame, v: &View) -> Hit {
     let pools: Vec<&Pool> = v.order.iter().filter_map(|&i| a.pools.get(i)).collect();
     let longest = pools
         .iter()
-        .flat_map(|p| visible(p, v.leaves))
+        .flat_map(|p| p.visible_rows(v.leaves))
         .map(|r| r.depth * 2 + 2 + display_name(r, v.full_names).chars().count())
         .max()
         .unwrap_or(NAME_MIN);
@@ -529,7 +523,7 @@ pub fn draw(f: &mut Frame, v: &View) -> Hit {
     put(f.buffer_mut(), gx, legend_y, cols.bar, &label, Style::default().fg(LABEL));
     let rest = Rect { y: body.y + 1, height: body.height - 1, ..body };
 
-    let heights: Vec<u16> = pools.iter().map(|p| visible(p, v.leaves).count() as u16 + 2).collect();
+    let heights: Vec<u16> = pools.iter().map(|p| p.visible_rows(v.leaves).count() as u16 + 2).collect();
     let offset = v.offset.min(pools.len() - 1);
     let need: u16 = heights[offset..].iter().sum();
     let spare = rest.height.saturating_sub(need);
@@ -651,6 +645,9 @@ fn draw_header(f: &mut Frame, area: Rect, v: &View) {
     if let Some(e) = a.error.as_ref().filter(|_| !a.pools.is_empty()) {
         spans.push(Span::styled(format!("  {} {}", ic.warn, e), Style::default().fg(WARN)));
     }
+    if let Some(e) = a.status_error.as_ref().or(a.status_warning.as_ref()) {
+        spans.push(Span::styled(format!("  {} {}", ic.warn, e), Style::default().fg(WARN)));
+    }
     if let Some((msg, err)) = v.status {
         spans.push(Span::styled(
             format!("  {}", msg),
@@ -731,7 +728,7 @@ fn draw_pool(f: &mut Frame, area: Rect, p: &Pool, cols: &Cols, v: &View) {
     f.render_widget(block, area);
     let buf = f.buffer_mut();
     let right = inner.right().saturating_sub(1);
-    for (row, r) in visible(p, v.leaves).enumerate() {
+    for (row, r) in p.visible_rows(v.leaves).enumerate() {
         let y = inner.y + row as u16;
         if y >= inner.bottom() {
             break;

@@ -116,9 +116,26 @@ view = {}
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
         }
-        let tmp = path.with_extension("conf.tmp");
-        std::fs::write(&tmp, self.render()).map_err(|e| format!("{}: {}", tmp.display(), e))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("{}: {}", path.display(), e))
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let (tmp, mut file) = loop {
+            let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let tmp = path.with_extension(format!("conf.{}.{seq}.tmp", std::process::id()));
+            if tmp == path {
+                continue;
+            }
+            match std::fs::File::create_new(&tmp) {
+                Ok(file) => break (tmp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("{}: {}", tmp.display(), e)),
+            }
+        };
+        let result = file.write_all(self.render().as_bytes()).and_then(|()| std::fs::rename(&tmp, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(tmp);
+        }
+        result.map_err(|e| format!("{}: {}", path.display(), e))
     }
 
     /// Indices into `names` in display order: listed names first, as listed,
@@ -154,6 +171,31 @@ mod tests {
         let (d, errors) = Config::parse(&Config::default().render());
         assert!(errors.is_empty());
         assert_eq!(d, Config::default());
+    }
+
+    #[test]
+    fn concurrent_saves_publish_a_complete_config() {
+        let dir = std::env::temp_dir().join(format!("iztop-config-test-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("iztop.conf");
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for id in 0..8 {
+                let (path, barrier) = (&path, &barrier);
+                scope.spawn(move || {
+                    let cfg = Config { pool_order: vec![id.to_string(); 64], ..Default::default() };
+                    barrier.wait();
+                    cfg.save(path).unwrap();
+                });
+            }
+        });
+        let (saved, warnings) = Config::load(&path).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(saved.pool_order.len(), 64);
+        assert!(saved.pool_order.iter().all(|n| n == &saved.pool_order[0]));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

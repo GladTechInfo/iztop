@@ -176,7 +176,7 @@ fn main() {
     if args.once {
         std::process::exit(once(&args, &cfg));
     }
-    let mut app = app::App::new(args.interval_ms, args.pools.clone());
+    let mut app = app::App::new(args.interval_ms, args.pools.clone(), false);
     let status = warnings.first().map(|w| format!("config {}", w));
     if let Err(e) = run_tui(&mut app, &args, cfg, path, status) {
         ratatui::restore();
@@ -195,24 +195,27 @@ fn display_order(app: &app::App, cfg: &Config, named: bool) -> Vec<usize> {
 /// One interval of `zpool iostat`, printed as a plain table for scripts.
 fn once(args: &Args, cfg: &Config) -> i32 {
     use std::fmt::Write as _;
-    let mut app = app::App::new(args.interval_ms, args.pools.clone());
+    let mut app = app::App::new(args.interval_ms, args.pools.clone(), true);
     let deadline = Instant::now() + Duration::from_millis(args.interval_ms * 4 + 10_000);
     // Two blocks, since busy is measured between them, and the status, which
     // is read alongside.
     loop {
         app.poll(false);
-        let have_status = !app.pools.is_empty() && app.pools.iter().all(|p| p.status.is_some());
-        if (app.blocks >= 2 && have_status) || Instant::now() >= deadline {
+        if let Some(e) = app.error.as_ref().or(app.status_error.as_ref()) {
+            eprintln!("iztop: {e}");
+            return 1;
+        }
+        if app.sample_ready() {
             break;
         }
-        if app.error.is_some() && app.blocks == 0 {
-            break;
+        if Instant::now() >= deadline {
+            eprintln!("iztop: incomplete sample: timed out waiting for two complete I/O intervals and pool summaries");
+            return 1;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    if app.blocks == 0 {
-        eprintln!("iztop: {}", app.error.as_deref().unwrap_or("no output from zpool iostat"));
-        return 1;
+    if let Some(warning) = &app.status_warning {
+        eprintln!("iztop: {warning}");
     }
     let na = |o: Option<String>| o.unwrap_or_else(|| "-".into());
     let f0 = |x: Option<f64>| na(x.map(|v| format!("{:.0}", v)));
@@ -241,7 +244,7 @@ fn once(args: &Args, cfg: &Config) -> i32 {
                 scan
             );
         }
-        for r in &p.rows {
+        for r in p.visible_rows(args.leaves) {
             let st = p.vdev_status(&r.key);
             let name = format!("{}{}", "  ".repeat(r.depth), r.short_name(args.full_names));
             let _ = writeln!(
